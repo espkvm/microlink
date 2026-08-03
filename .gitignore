@@ -7,8 +7,9 @@ sdkconfig
 sdkconfig.old
 sdkconfig.credentials
 
-# Managed components (downloaded by idf.py)
+# Managed components (downloaded by idf.py) + the lock file it generates
 **/managed_components/
+**/dependencies.lock
 
 # Backups
 backups/

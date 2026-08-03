@@ -17,8 +17,9 @@
 #include "microlink_internal.h"
 #include "esp_log.h"
 #include "esp_random.h"
-#include "mbedtls/chacha20.h"
-#include "mbedtls/chachapoly.h"
+/* mbedTLS 4 (ESP-IDF 6) made the direct mbedtls_chachapoly_* API private; the
+ * public one-shot AEAD path is PSA (PSA_ALG_CHACHA20_POLY1305). */
+#include "psa/crypto.h"
 #include <string.h>
 
 static const char *TAG = "ml_noise";
@@ -167,17 +168,25 @@ static int chacha20poly1305_encrypt(const uint8_t *key, uint64_t nonce,
     nonce_bytes[10] = (nonce >> 8) & 0xFF;
     nonce_bytes[11] = nonce & 0xFF;
 
-    mbedtls_chachapoly_context ctx;
-    mbedtls_chachapoly_init(&ctx);
-    mbedtls_chachapoly_setkey(&ctx, key);
+    if (psa_crypto_init() != PSA_SUCCESS) return -1;
 
-    /* ciphertext layout: encrypted_data(pt_len) + tag(16) */
-    int ret = mbedtls_chachapoly_encrypt_and_tag(&ctx,
-                pt_len, nonce_bytes, ad, ad_len,
-                plaintext, ciphertext, ciphertext + pt_len);
+    psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_ENCRYPT);
+    psa_set_key_algorithm(&attr, PSA_ALG_CHACHA20_POLY1305);
+    psa_set_key_type(&attr, PSA_KEY_TYPE_CHACHA20);
+    psa_set_key_bits(&attr, 256);
 
-    mbedtls_chachapoly_free(&ctx);
-    return ret;
+    psa_key_id_t k;
+    if (psa_import_key(&attr, key, 32, &k) != PSA_SUCCESS) return -1;
+
+    /* PSA output layout = encrypted_data(pt_len) + tag(16), which is exactly the
+     * ciphertext layout the caller expects. */
+    size_t olen = 0;
+    psa_status_t st = psa_aead_encrypt(k, PSA_ALG_CHACHA20_POLY1305,
+                nonce_bytes, sizeof(nonce_bytes), ad, ad_len,
+                plaintext, pt_len, ciphertext, pt_len + 16, &olen);
+    psa_destroy_key(k);
+    return (st == PSA_SUCCESS) ? 0 : -1;
 }
 
 static int chacha20poly1305_decrypt(const uint8_t *key, uint64_t nonce,
@@ -199,18 +208,26 @@ static int chacha20poly1305_decrypt(const uint8_t *key, uint64_t nonce,
     nonce_bytes[11] = nonce & 0xFF;
 
     size_t payload_len = ct_len - 16;
-    const uint8_t *tag = ciphertext + payload_len;
 
-    mbedtls_chachapoly_context ctx;
-    mbedtls_chachapoly_init(&ctx);
-    mbedtls_chachapoly_setkey(&ctx, key);
+    if (psa_crypto_init() != PSA_SUCCESS) return -1;
 
-    int ret = mbedtls_chachapoly_auth_decrypt(&ctx,
-                payload_len, nonce_bytes, ad, ad_len,
-                tag, ciphertext, plaintext);
+    psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_DECRYPT);
+    psa_set_key_algorithm(&attr, PSA_ALG_CHACHA20_POLY1305);
+    psa_set_key_type(&attr, PSA_KEY_TYPE_CHACHA20);
+    psa_set_key_bits(&attr, 256);
 
-    mbedtls_chachapoly_free(&ctx);
-    return ret;
+    psa_key_id_t k;
+    if (psa_import_key(&attr, key, 32, &k) != PSA_SUCCESS) return -1;
+
+    /* PSA takes ciphertext||tag as one buffer; the tag is already contiguous at
+     * ciphertext + payload_len, so pass the whole ct_len. */
+    size_t olen = 0;
+    psa_status_t st = psa_aead_decrypt(k, PSA_ALG_CHACHA20_POLY1305,
+                nonce_bytes, sizeof(nonce_bytes), ad, ad_len,
+                ciphertext, ct_len, plaintext, payload_len, &olen);
+    psa_destroy_key(k);
+    return (st == PSA_SUCCESS) ? 0 : -1;
 }
 
 /* ============================================================================

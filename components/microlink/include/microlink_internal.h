@@ -24,8 +24,10 @@
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "mbedtls/ssl.h"
-#include "mbedtls/entropy.h"
-#include "mbedtls/ctr_drbg.h"
+/* mbedTLS 4 (ESP-IDF 6) moved ctr_drbg/entropy to a private API and dropped
+ * mbedtls_ssl_conf_rng(); the TLS layer now draws randomness from the PSA crypto
+ * subsystem, which the coord/DERP setup initialises with psa_crypto_init(). */
+#include "psa/crypto.h"
 #include "esp_heap_caps.h"
 
 #ifdef CONFIG_ML_ZERO_COPY_WG
@@ -324,8 +326,6 @@ typedef struct {
     int sockfd;                     /* Raw TCP socket */
     mbedtls_ssl_context ssl;        /* TLS context (owned exclusively by DERP I/O task) */
     mbedtls_ssl_config ssl_conf;
-    mbedtls_entropy_context entropy;
-    mbedtls_ctr_drbg_context ctr_drbg;
     bool connected;
     uint64_t last_recv_ms;          /* For keepalive watchdog */
 } ml_derp_conn_t;
@@ -386,8 +386,6 @@ struct microlink_s {
     bool coord_tls_up;
     mbedtls_ssl_context coord_ssl;
     mbedtls_ssl_config coord_ssl_conf;
-    mbedtls_entropy_context coord_entropy;
-    mbedtls_ctr_drbg_context coord_ctr_drbg;
     uint32_t h2_next_stream_id;         /* Next H2 stream ID for endpoint updates (odd, starts at 7) */
 
     /* WireGuard netif (owned exclusively by wg_mgr task) */

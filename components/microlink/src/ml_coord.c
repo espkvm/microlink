@@ -128,8 +128,6 @@ static void coord_tls_free(microlink_t *ml) {
     if (!ml->coord_tls_up) return;
     mbedtls_ssl_free(&ml->coord_ssl);
     mbedtls_ssl_config_free(&ml->coord_ssl_conf);
-    mbedtls_ctr_drbg_free(&ml->coord_ctr_drbg);
-    mbedtls_entropy_free(&ml->coord_entropy);
     ml->coord_tls_up = false;
 }
 
@@ -386,18 +384,21 @@ static int do_tcp_connect(microlink_t *ml) {
      * VERIFY_NONE matches the DERP connection: the ts2021 Noise handshake, not
      * the TLS certificate, is what authenticates the control plane. */
     if (ml->config.ctrl_tls) {
+        /* mbedTLS 4 (ESP-IDF 6): RNG comes from PSA, not ctr_drbg/entropy. */
+        if (psa_crypto_init() != PSA_SUCCESS) {
+            ESP_LOGE(TAG, "psa_crypto_init failed");
+            ml_close_sock(sock);
+            ml->coord_sock = -1;
+            return ESP_FAIL;
+        }
         mbedtls_ssl_init(&ml->coord_ssl);
         mbedtls_ssl_config_init(&ml->coord_ssl_conf);
-        mbedtls_entropy_init(&ml->coord_entropy);
-        mbedtls_ctr_drbg_init(&ml->coord_ctr_drbg);
         ml->coord_tls_up = true;  /* context now needs freeing on the next reconnect */
 
-        mbedtls_ctr_drbg_seed(&ml->coord_ctr_drbg, mbedtls_entropy_func,
-                              &ml->coord_entropy, NULL, 0);
         mbedtls_ssl_config_defaults(&ml->coord_ssl_conf, MBEDTLS_SSL_IS_CLIENT,
                                     MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
         mbedtls_ssl_conf_authmode(&ml->coord_ssl_conf, MBEDTLS_SSL_VERIFY_NONE);
-        mbedtls_ssl_conf_rng(&ml->coord_ssl_conf, mbedtls_ctr_drbg_random, &ml->coord_ctr_drbg);
+        /* mbedTLS 4 removed mbedtls_ssl_conf_rng(); the SSL layer uses PSA RNG. */
         mbedtls_ssl_conf_read_timeout(&ml->coord_ssl_conf, COORD_TLS_TIMEOUT_MS);
         mbedtls_ssl_setup(&ml->coord_ssl, &ml->coord_ssl_conf);
         mbedtls_ssl_set_hostname(&ml->coord_ssl, CTRL_HOST(ml));
