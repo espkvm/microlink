@@ -1112,6 +1112,17 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
                 }
             }
         }
+        /* Our MagicDNS FQDN (Node.Name), used e.g. to name a TLS certificate. */
+        cJSON *self_nm = cJSON_GetObjectItem(node, "Name");
+        if (self_nm && self_nm->valuestring && self_nm->valuestring[0]) {
+            strncpy(ml->self_name, self_nm->valuestring, sizeof(ml->self_name) - 1);
+            ml->self_name[sizeof(ml->self_name) - 1] = '\0';
+            size_t nl = strlen(ml->self_name);
+            if (nl > 0 && ml->self_name[nl - 1] == '.') {
+                ml->self_name[nl - 1] = '\0';
+            }
+            ESP_LOGI(TAG, "Our tailnet name: %s", ml->self_name);
+        }
         /* Parse self-node DERP region — try modern HomeDERP (int) first,
          * then fall back to legacy DERP string (format: "127.3.3.40:REGION") */
         cJSON *home_derp = cJSON_GetObjectItem(node, "HomeDERP");
@@ -1774,6 +1785,17 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
                         }
                     }
                 }
+            }
+            /* Our MagicDNS FQDN (Node.Name), used e.g. to name a TLS certificate. */
+            cJSON *self_nm = cJSON_GetObjectItem(node, "Name");
+            if (self_nm && self_nm->valuestring && self_nm->valuestring[0]) {
+                strncpy(ml->self_name, self_nm->valuestring, sizeof(ml->self_name) - 1);
+                ml->self_name[sizeof(ml->self_name) - 1] = '\0';
+                size_t nl = strlen(ml->self_name);
+                if (nl > 0 && ml->self_name[nl - 1] == '.') {
+                    ml->self_name[nl - 1] = '\0';
+                }
+                ESP_LOGI(TAG, "Our tailnet name: %s", ml->self_name);
             }
             /* Parse self-node DERP region — try modern HomeDERP (int) first,
              * then fall back to legacy DERP string (format: "127.3.3.40:REGION") */

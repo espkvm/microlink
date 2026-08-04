@@ -168,6 +168,15 @@ uint32_t microlink_get_vpn_ip(const microlink_t *ml);
 int microlink_get_peer_count(const microlink_t *ml);
 
 /**
+ * @brief Get our own MagicDNS name (FQDN) as assigned by the control plane
+ * @return NUL-terminated FQDN (e.g. "host.tailnet.ts.net"), or "" if not yet known
+ *
+ * Available once the first MapResponse has named this node. The trailing dot,
+ * if any, is stripped.
+ */
+const char *microlink_get_self_name(const microlink_t *ml);
+
+/**
  * @brief Get peer info by index
  * @param ml Handle
  * @param index Peer index (0 to peer_count-1)

@@ -626,8 +626,12 @@ void ml_derp_tx_task(void *arg) {
             }
         }
 
-        /* Yield briefly */
-        vTaskDelay(pdMS_TO_TICKS(1));
+        /* Sleep at least one tick between polls. pdMS_TO_TICKS(1) rounds to 0 at
+         * a 100 Hz tick (the ESP-KVM default), which turned this into a busy spin
+         * that burned a whole core; vTaskDelay(1) always yields for a real tick
+         * (10 ms @100 Hz, 1 ms @1000 Hz). DERP carries only control-plane traffic
+         * here, so a 10 ms poll interval is inconsequential. */
+        vTaskDelay(1);
     }
 
     ESP_LOGI(TAG, "DERP I/O task exiting");

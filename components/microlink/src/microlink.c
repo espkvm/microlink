@@ -598,6 +598,10 @@ uint32_t microlink_get_vpn_ip(const microlink_t *ml) {
     return ml ? ml->vpn_ip : 0;
 }
 
+const char *microlink_get_self_name(const microlink_t *ml) {
+    return ml ? ml->self_name : "";
+}
+
 int microlink_get_peer_count(const microlink_t *ml) {
     return ml ? ml->peer_count : 0;
 }

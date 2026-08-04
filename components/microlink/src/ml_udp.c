@@ -12,6 +12,7 @@
  */
 
 #include "microlink_internal.h"
+#include "ml_lwip_lock.h"
 #include "esp_log.h"
 #include "lwip/udp.h"
 #include "lwip/pbuf.h"
@@ -168,38 +169,42 @@ microlink_udp_socket_t *microlink_udp_create(microlink_t *ml, uint16_t local_por
         return NULL;
     }
 
-    sock->pcb = udp_new();
-    if (!sock->pcb) {
-        vSemaphoreDelete(sock->rx_sem);
-        free(sock);
-        return NULL;
-    }
-
-    /* Bind to WG netif */
-    if (ml->wg_netif) {
-        udp_bind_netif(sock->pcb, (struct netif *)ml->wg_netif);
-    }
-
     /* Bind to VPN IP + port */
     ip_addr_t local_ip;
     ip_to_lwip(ml->vpn_ip, &local_ip);
 
-    err_t err = udp_bind(sock->pcb, &local_ip, local_port);
-    if (err != ERR_OK) {
-        ESP_LOGE(TAG, "udp_bind failed: %d", err);
-        udp_remove(sock->pcb);
+    /* Raw lwIP pcb setup, under the core lock (see ml_lwip_lock.h). */
+    bool _l = ml_lwip_lock();
+    sock->pcb = udp_new();
+    if (!sock->pcb) {
+        ml_lwip_unlock(_l);
         vSemaphoreDelete(sock->rx_sem);
         free(sock);
         return NULL;
     }
-
+    if (ml->wg_netif) {
+        udp_bind_netif(sock->pcb, (struct netif *)ml->wg_netif);
+    }
+    err_t err = udp_bind(sock->pcb, &local_ip, local_port);
+    if (err != ERR_OK) {
+        udp_remove(sock->pcb);
+        ml_lwip_unlock(_l);
+        ESP_LOGE(TAG, "udp_bind failed: %d", err);
+        vSemaphoreDelete(sock->rx_sem);
+        free(sock);
+        return NULL;
+    }
     sock->local_port = sock->pcb->local_port;
     udp_recv(sock->pcb, udp_recv_cb, sock);
+    ml_lwip_unlock(_l);
 
     /* Start RX task on Core 1 */
     sock->rx_running = true;
+    /* Prio kept low (was configMAX_PRIORITIES-2, above even the TCP/IP thread):
+     * at that priority the WG data-plane RX preempted a co-hosted TLS server's
+     * handshake during a UDP burst. WG throughput is not latency-critical here. */
     if (xTaskCreatePinnedToCore(udp_rx_task, "ml_udp_rx", 4096, sock,
-                                 configMAX_PRIORITIES - 2, &sock->rx_task, 1) != pdPASS) {
+                                 ML_TASK_WG_MGR_PRIO, &sock->rx_task, 1) != pdPASS) {
         sock->rx_running = false;
         sock->rx_task = NULL;
     }
@@ -226,7 +231,9 @@ void microlink_udp_close(microlink_udp_socket_t *sock) {
      * The callback runs from tcpip thread and accesses sock->rx_sem,
      * so it must be unregistered before we touch any sock fields. */
     if (sock->pcb) {
+        bool _l = ml_lwip_lock();
         udp_recv(sock->pcb, NULL, NULL);
+        ml_lwip_unlock(_l);
     }
 
     if (sock->rx_running) {
@@ -236,7 +243,9 @@ void microlink_udp_close(microlink_udp_socket_t *sock) {
     }
 
     if (sock->pcb) {
+        bool _l = ml_lwip_lock();
         udp_remove(sock->pcb);
+        ml_lwip_unlock(_l);
     }
 
     if (sock->rx_sem) vSemaphoreDelete(sock->rx_sem);
@@ -256,7 +265,9 @@ esp_err_t microlink_udp_send(microlink_udp_socket_t *sock, uint32_t dest_ip,
     if (!p) return ESP_ERR_NO_MEM;
 
     memcpy(p->payload, data, len);
+    bool _l = ml_lwip_lock();
     err_t err = udp_sendto(sock->pcb, p, &dest, dest_port);
+    ml_lwip_unlock(_l);
     pbuf_free(p);
 
     if (err != ERR_OK) {

@@ -44,21 +44,31 @@ extern "C" {
  * Constants
  * ========================================================================== */
 
-/* Task configuration */
+/* Task configuration.
+ * Priorities are kept BELOW a co-hosted application's latency-critical tasks so
+ * MicroLink cannot starve them. In ESP-KVM the HTTPS console runs at prio 6 and
+ * the video capture task at prio 5; MicroLink's heaviest task must stay under
+ * both or a TLS handshake (CPU-bound crypto) gets preempted long enough that the
+ * browser times out. The relative order here is preserved: the RX-latency tasks
+ * (net_io, wg_mgr) sit above the throughput tasks (derp_tx, coord). */
+/* All MicroLink tasks are pinned to core 1, leaving core 0 for the ESP-KVM video
+ * capture/encode task (which runs there) so the tunnel cannot steal cycles from
+ * the real-time capture path. On this board core 1's other big tenant is the
+ * H.264 encoder, idle in the default MJPEG mode. */
 #define ML_TASK_NET_IO_STACK    (8 * 1024)
-#define ML_TASK_NET_IO_PRIO     7
-#define ML_TASK_NET_IO_CORE     0
+#define ML_TASK_NET_IO_PRIO     4
+#define ML_TASK_NET_IO_CORE     1
 
 #define ML_TASK_DERP_TX_STACK   (14 * 1024)
-#define ML_TASK_DERP_TX_PRIO    5
-#define ML_TASK_DERP_TX_CORE    0
+#define ML_TASK_DERP_TX_PRIO    3
+#define ML_TASK_DERP_TX_CORE    1
 
 #define ML_TASK_COORD_STACK     (12 * 1024)
-#define ML_TASK_COORD_PRIO      5
+#define ML_TASK_COORD_PRIO      3
 #define ML_TASK_COORD_CORE      1
 
 #define ML_TASK_WG_MGR_STACK    (8 * 1024)
-#define ML_TASK_WG_MGR_PRIO     7
+#define ML_TASK_WG_MGR_PRIO     4
 #define ML_TASK_WG_MGR_CORE     1
 
 /* Queue depths */
@@ -341,6 +351,9 @@ struct microlink_s {
     /* State (atomic reads from any task, writes only from coord) */
     volatile microlink_state_t state;
     volatile uint32_t vpn_ip;
+    /* Our own MagicDNS FQDN from the control plane (e.g. "host.tailnet.ts.net"),
+     * empty until a MapResponse names us. Written only from coord. */
+    char self_name[128];
 
     /* Event group (cross-task synchronization) */
     EventGroupHandle_t events;
