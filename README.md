@@ -1,5 +1,28 @@
 # MicroLink v2 — ESP32 Tailscale Client
 
+> ### `idf6` branch — ESP-IDF 6.0 port
+>
+> This branch ports MicroLink to **ESP-IDF 6.0 / mbedTLS 4 (PSA crypto)** and is
+> the branch [ESP-KVM](https://github.com/espkvm/espkvm) builds against. Changes
+> from upstream:
+>
+> - **mbedTLS 4 / PSA:** randomness comes from `psa_generate_random`; the removed
+>   legacy APIs (`mbedtls_ssl_conf_rng`, the standalone ChaCha20-Poly1305 module)
+>   are replaced with PSA / IDF 6 equivalents.
+> - **GCC 15:** `-Wstringop-truncation`/`nonstring` fixes on the fixed-size string
+>   fields.
+> - Builds as-is on the **ESP32-P4**. A P4 **rev < 3.0** additionally needs
+>   `CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y`, `REV_MIN_100`, and the CPU at 360 MHz.
+> - Requires `CONFIG_MBEDTLS_CHACHA20_C=y`, `CONFIG_MBEDTLS_POLY1305_C=y`,
+>   `CONFIG_MBEDTLS_CHACHAPOLY_C=y` (no WiFi supplicant on the P4 pulls them in).
+> - **TLS control-plane transport** (`ctrl_tls`/`ctrl_port`) for HTTPS-fronted
+>   Headscale and hosted Tailscale — issue #16.
+> - **Latency-based home DERP region** selection (`config.derp_home_region`,
+>   `0` = auto) so relayed traffic does not default to Dallas — issue #19.
+>
+> The feature list below is upstream MicroLink; everything there applies on IDF 6
+> too.
+
 Production-ready Tailscale VPN client for the ESP32 platform with WiFi and 4G cellular support. Should work on most ESP32 variants (ESP32, ESP32-S3, ESP32-P4, etc.) — ESP32-S3 with PSRAM recommended for production.
 
 ## Features
@@ -8,7 +31,7 @@ Production-ready Tailscale VPN client for the ESP32 platform with WiFi and 4G ce
   - ts2021 coordination protocol
   - WireGuard encryption (ChaCha20-Poly1305)
   - DISCO path discovery (PING/PONG/CALL_ME_MAYBE)
-  - DERP relay with dynamic region discovery (up to 32 regions)
+  - DERP relay with dynamic region discovery (up to 32 regions) and latency-based home-region selection (issue #19)
   - STUN for public IP / NAT type discovery (IPv4 + IPv6)
   - Delta updates (PeersChanged, PeersRemoved, PeersChangedPatch)
   - MagicDNS hostname resolution (short name or FQDN)

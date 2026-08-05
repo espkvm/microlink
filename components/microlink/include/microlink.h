@@ -54,6 +54,14 @@ typedef struct {
      * ctrl_port overrides the TCP port (0 = 443 when ctrl_tls, otherwise 80). */
     bool ctrl_tls;
     uint16_t ctrl_port;
+
+    /* Home DERP region (issue #19). When relaying through DERP - which is the
+     * default without direct paths - the region decides the relay's distance and
+     * so the latency. 0 (the default) picks the nearest region automatically by a
+     * one-shot STUN latency probe once the DERP map is known, falling back to
+     * Frankfurt then the built-in default if nothing answers. A non-zero value
+     * forces that region id and skips the probe. */
+    uint16_t derp_home_region;
 } microlink_config_t;
 
 /* Peer info (read-only snapshot) */

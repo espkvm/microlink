@@ -17,6 +17,7 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_crc.h"
+#include "esp_timer.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 #include <string.h>
@@ -347,6 +348,119 @@ esp_err_t ml_stun_send_probe_to(microlink_t *ml, uint32_t server_ip, uint16_t po
     microlink_ip_to_str(server_ip, ip_str);
     ESP_LOGI(TAG, "STUN probe sent to %s:%u (%d bytes)", ip_str, port, (int)req_len);
     return ESP_OK;
+}
+
+/* ============================================================================
+ * Home DERP region selection by latency (issue #19)
+ * ========================================================================== */
+
+/*
+ * Send a STUN binding request to each DERP region's node and return whichever
+ * answers fastest. This runs once, right after the DERP map is parsed and before
+ * the relay is connected, so a device far from the built-in default region
+ * (Dallas) relays through a nearby region instead of paying an intercontinental
+ * round-trip on every relayed packet. Self-contained: its own short-lived socket,
+ * literal IPv4s from the map (no DNS), a per-recv 200 ms timeout and a 1.5 s total
+ * budget. Returns the nearest region id, or 0 if nothing answered.
+ */
+uint16_t ml_stun_pick_nearest_region(microlink_t *ml) {
+    if (!ml || ml->derp_region_count == 0) {
+        return 0;
+    }
+
+    int sock = ml_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        ESP_LOGW(TAG, "region probe: socket failed: %d", errno);
+        return 0;
+    }
+    struct sockaddr_in bind_addr = {
+        .sin_family = AF_INET, .sin_port = 0, .sin_addr.s_addr = INADDR_ANY,
+    };
+    ml_bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr));
+    struct timeval rcv_to = { .tv_sec = 0, .tv_usec = 200000 };
+    ml_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));
+
+    struct {
+        uint8_t txid[12];
+        uint16_t region;
+        int64_t sent_us;
+        bool pending;
+    } probe[ML_MAX_DERP_REGIONS];
+    int count = 0;
+
+    for (int i = 0; i < ml->derp_region_count && count < ML_MAX_DERP_REGIONS; i++) {
+        ml_derp_region_t *r = &ml->derp_regions[i];
+        if (r->avoid || r->node_count == 0) {
+            continue;
+        }
+        ml_derp_node_t *node = NULL;
+        for (int j = 0; j < r->node_count; j++) {
+            if (r->nodes[j].ipv4[0]) {
+                node = &r->nodes[j];
+                break;
+            }
+        }
+        if (!node) {
+            continue;
+        }
+        struct sockaddr_in dst = { .sin_family = AF_INET };
+        dst.sin_port = htons(node->stun_port ? node->stun_port : 3478);
+        if (!inet_aton(node->ipv4, &dst.sin_addr)) {
+            continue;
+        }
+        uint8_t req[STUN_REQUEST_SIZE];
+        size_t req_len = build_stun_request(req, probe[count].txid);
+        probe[count].region = r->region_id;
+        probe[count].sent_us = esp_timer_get_time();
+        probe[count].pending = true;
+        if (ml_sendto(sock, req, req_len, 0, (struct sockaddr *)&dst, sizeof(dst)) < 0) {
+            continue;
+        }
+        count++;
+    }
+
+    if (count == 0) {
+        ml_close_sock(sock);
+        return 0;
+    }
+
+    uint16_t best_region = 0;
+    int64_t best_rtt = INT64_MAX;
+    int answered = 0;
+    const int64_t deadline = esp_timer_get_time() + 1500 * 1000; /* 1.5 s budget */
+
+    while (answered < count && esp_timer_get_time() < deadline) {
+        uint8_t buf[128];
+        struct sockaddr_in from;
+        socklen_t from_len = sizeof(from);
+        int n = ml_recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr *)&from, &from_len);
+        if (n < STUN_HEADER_SIZE) {
+            continue; /* recv timeout or a runt packet: keep going until the deadline */
+        }
+        /* The response echoes the 12-byte transaction id at offset 8; match it. */
+        for (int k = 0; k < count; k++) {
+            if (probe[k].pending && memcmp(buf + 8, probe[k].txid, 12) == 0) {
+                const int64_t rtt = esp_timer_get_time() - probe[k].sent_us;
+                probe[k].pending = false;
+                answered++;
+                if (rtt < best_rtt) {
+                    best_rtt = rtt;
+                    best_region = probe[k].region;
+                }
+                break;
+            }
+        }
+    }
+
+    ml_close_sock(sock);
+
+    if (best_region) {
+        ESP_LOGI(TAG, "DERP region probe: nearest is %u (%lld ms), %d/%d answered",
+                 best_region, best_rtt / 1000, answered, count);
+    } else {
+        ESP_LOGW(TAG, "DERP region probe: none of %d regions answered", count);
+    }
+    return best_region;
 }
 
 /* ============================================================================

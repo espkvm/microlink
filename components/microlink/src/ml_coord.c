@@ -872,7 +872,7 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
     {
         cJSON *netinfo = cJSON_CreateObject();
         if (netinfo) {
-            cJSON_AddNumberToObject(netinfo, "PreferredDERP", ML_DERP_REGION);
+            cJSON_AddNumberToObject(netinfo, "PreferredDERP", ml->derp_home_region ? ml->derp_home_region : ML_DERP_REGION);
             cJSON_AddItemToObject(hostinfo, "NetInfo", netinfo);
         }
     }
@@ -1499,7 +1499,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
      * to populate Node.HomeDERP for other peers. */
     cJSON *netinfo = cJSON_CreateObject();
     if (netinfo) {
-        cJSON_AddNumberToObject(netinfo, "PreferredDERP", ML_DERP_REGION);
+        cJSON_AddNumberToObject(netinfo, "PreferredDERP", ml->derp_home_region ? ml->derp_home_region : ML_DERP_REGION);
         if (ml->stun_nat_checked) {
             cJSON_AddBoolToObject(netinfo, "MappingVariesByDestIP", ml->nat_mapping_varies);
         }
@@ -1944,6 +1944,43 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
                 ml->derp_region_count++;
             }
             ESP_LOGI(TAG, "DERPMap: parsed %d regions", ml->derp_region_count);
+
+            /*
+             * Choose the home DERP region now that the map is known, before the
+             * relay is connected (issue #19). The server assigns Dallas by default
+             * because that is the PreferredDERP we historically reported, which is
+             * a bad relay for anyone outside North America. A configured region id
+             * wins; otherwise probe latency and pick the nearest, falling back to
+             * Frankfurt (region code "fra") and then whatever we already had.
+             */
+            if (ml->derp_region_count > 0 && !ml->derp_home_probed) {
+                ml->derp_home_probed = true;
+                if (ml->config.derp_home_region) {
+                    ml->derp_home_region = ml->config.derp_home_region;
+                    ESP_LOGI(TAG, "Home DERP region: %u (configured)", ml->derp_home_region);
+                } else {
+                    uint16_t nearest = ml_stun_pick_nearest_region(ml);
+                    if (nearest) {
+                        ml->derp_home_region = nearest;
+                    } else {
+                        uint16_t fra = 0;
+                        for (int i = 0; i < ml->derp_region_count; i++) {
+                            if (strcmp(ml->derp_regions[i].code, "fra") == 0) {
+                                fra = ml->derp_regions[i].region_id;
+                                break;
+                            }
+                        }
+                        if (fra) {
+                            ml->derp_home_region = fra;
+                            ESP_LOGW(TAG, "DERP probe failed; falling back to Frankfurt (region %u)",
+                                     fra);
+                        } else {
+                            ESP_LOGW(TAG, "DERP probe failed, no Frankfurt in map; keeping region %u",
+                                     ml->derp_home_region ? ml->derp_home_region : ML_DERP_REGION);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1996,7 +2033,7 @@ static int do_start_long_poll(microlink_t *ml, ml_noise_state_t *noise) {
      * to populate Node.HomeDERP for other peers. */
     cJSON *netinfo = cJSON_CreateObject();
     if (netinfo) {
-        cJSON_AddNumberToObject(netinfo, "PreferredDERP", ML_DERP_REGION);
+        cJSON_AddNumberToObject(netinfo, "PreferredDERP", ml->derp_home_region ? ml->derp_home_region : ML_DERP_REGION);
         if (ml->stun_nat_checked) {
             cJSON_AddBoolToObject(netinfo, "MappingVariesByDestIP", ml->nat_mapping_varies);
         }
@@ -2097,7 +2134,7 @@ static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
 
         cJSON *netinfo = cJSON_CreateObject();
         if (netinfo) {
-            cJSON_AddNumberToObject(netinfo, "PreferredDERP", ML_DERP_REGION);
+            cJSON_AddNumberToObject(netinfo, "PreferredDERP", ml->derp_home_region ? ml->derp_home_region : ML_DERP_REGION);
             if (ml->stun_nat_checked) {
                 cJSON_AddBoolToObject(netinfo, "MappingVariesByDestIP", ml->nat_mapping_varies);
             }
