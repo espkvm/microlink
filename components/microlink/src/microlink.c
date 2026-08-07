@@ -174,6 +174,11 @@ microlink_t *microlink_init(const microlink_config_t *config) {
 
     /* Copy config */
     ml->config = *config;
+    /* Control-server host from the caller's config (Headscale/custom coordinator).
+     * A config-httpd NVS value, if present, still overrides this below. */
+    if (config->ctrl_host && config->ctrl_host[0]) {
+        strncpy(ml->ctrl_host, config->ctrl_host, sizeof(ml->ctrl_host) - 1);
+    }
     if (ml->config.max_peers == 0) ml->config.max_peers = ML_MAX_PEERS;
     if (ml->config.max_peers > ML_MAX_PEERS) ml->config.max_peers = ML_MAX_PEERS;
     ml->config.enable_derp = true;  /* Always need DERP for relay */

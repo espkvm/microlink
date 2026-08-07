@@ -55,6 +55,11 @@ typedef struct {
     bool ctrl_tls;
     uint16_t ctrl_port;
 
+    /* Control-server host override (NULL or "" = the hosted Tailscale default,
+     * controlplane.tailscale.com). Set to a Headscale/Ionscale/custom coordinator
+     * host so the client joins a self-hosted control plane instead. */
+    const char *ctrl_host;
+
     /* Home DERP region (issue #19). When relaying through DERP - which is the
      * default without direct paths - the region decides the relay's distance and
      * so the latency. 0 (the default) picks the nearest region automatically by a
