@@ -38,6 +38,39 @@
 
 static const char *TAG = "ml_coord";
 
+/*
+ * Where the JSON body starts in a control-plane response.
+ *
+ * Some responses arrive as a 4-byte little-endian length followed by the JSON,
+ * and some arrive as bare JSON. The length is what decides which, not the
+ * position of the first '{': a length whose low byte is 0x7b *is* an ASCII '{',
+ * so scanning for a brace finds the prefix itself and parses from there.
+ *
+ * That is not hypothetical, and it is not intermittent either. A 20863-byte
+ * MapResponse carries the little-endian length 0x0000517b, whose first byte is
+ * '{', so the scan reported offset 0 and cJSON was handed
+ * "{Q\0\0{\"Node\"..." — failing at byte 1. Because a netmap's size is stable
+ * for a given tailnet, the retry produces the same buffer and the same failure
+ * indefinitely: the device never joins, and the control plane times out. The
+ * same tailnet's 20861-byte response carries 0x00005179 and parsed fine minutes
+ * earlier, which is what makes this look like flakiness across boots while
+ * being perfectly deterministic within one.
+ *
+ * Returns 4 when the first four bytes declare exactly the rest of the buffer,
+ * and 0 otherwise. No byte value can spoof that arithmetic.
+ */
+static size_t coord_json_offset(const uint8_t *buf, size_t total)
+{
+    if (buf == NULL || total <= 4) {
+        return 0;
+    }
+    const uint32_t declared = (uint32_t)buf[0]
+                            | ((uint32_t)buf[1] << 8)
+                            | ((uint32_t)buf[2] << 16)
+                            | ((uint32_t)buf[3] << 24);
+    return (size_t)declared + 4 == total ? 4 : 0;
+}
+
 /* Effective control plane host: NVS override or compiled default */
 #define CTRL_HOST(ml) ((ml)->ctrl_host[0] ? (ml)->ctrl_host : ML_CTRL_HOST)
 
@@ -1061,22 +1094,19 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
         ESP_LOGI(TAG, "RegisterResponse first %d bytes (hex): %s", dump, hexbuf);
     }
 
-    /* Find start of JSON - skip any binary prefix */
+    /* Skip the length prefix if the length says there is one, the same way the
+       MapResponse does. The registration reply has arrived as bare JSON in every
+       capture so far, and the arithmetic says so rather than assuming it. */
     char *parse_start = (char *)json_data;
     size_t parse_len = json_data_len;
-    int json_offset = -1;
-    for (int i = 0; i < 8 && i < (int)json_data_len; i++) {
-        if (json_data[i] == '{') {
-            json_offset = i;
-            break;
-        }
-    }
+    const size_t json_offset = coord_json_offset(json_data, json_data_len);
     if (json_offset > 0) {
-        ESP_LOGI(TAG, "RegisterResponse JSON starts at offset %d", json_offset);
+        ESP_LOGI(TAG, "RegisterResponse JSON starts at offset %d (declared length prefix)", (int)json_offset);
         parse_start += json_offset;
         parse_len -= json_offset;
-    } else if (json_offset < 0) {
-        ESP_LOGW(TAG, "No '{' found in RegisterResponse data");
+    }
+    if (parse_len == 0 || parse_start[0] != '{') {
+        ESP_LOGW(TAG, "RegisterResponse does not open with '{' at offset %d", (int)json_offset);
         free(resp_buf);
         return 0;
     }
@@ -1710,24 +1740,20 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
         ESP_LOGI(TAG, "MapResponse first %d bytes (hex): %s", dump, hexbuf);
     }
 
-    /* Check for length prefix (Tailscale binary framing: 4-byte big-endian length before JSON) */
+    /* Skip the length prefix if the length says there is one (Tailscale binary
+       framing: 4-byte little-endian length before the JSON). Read rather than
+       sniffed for; see coord_json_offset. */
     char *parse_start = (char *)resp_buf;
     size_t parse_len = json_total;
 
-    /* Find the start of JSON - look for '{' in first 8 bytes */
-    int json_offset = -1;
-    for (int i = 0; i < 8 && i < (int)json_total; i++) {
-        if (resp_buf[i] == '{') {
-            json_offset = i;
-            break;
-        }
-    }
+    const size_t json_offset = coord_json_offset(resp_buf, json_total);
     if (json_offset > 0) {
-        ESP_LOGI(TAG, "JSON starts at offset %d (skipping %d-byte prefix)", json_offset, json_offset);
+        ESP_LOGI(TAG, "JSON starts at offset %d (declared length prefix)", (int)json_offset);
         parse_start += json_offset;
         parse_len -= json_offset;
-    } else if (json_offset < 0) {
-        ESP_LOGW(TAG, "No '{' found in first 8 bytes of MapResponse!");
+    }
+    if (parse_len == 0 || parse_start[0] != '{') {
+        ESP_LOGW(TAG, "MapResponse does not open with '{' at offset %d", (int)json_offset);
     }
 
     /* Null-terminate */
