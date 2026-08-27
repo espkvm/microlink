@@ -134,8 +134,12 @@ esp_err_t ml_peer_nvs_save(const ml_peer_t *peer) {
     }
     entry.endpoint_count = stored;
 
-    /* Truncated hostname for display */
-    strncpy(entry.hostname_short, peer->hostname, sizeof(entry.hostname_short) - 1);
+    /* Truncated hostname for display. memcpy, not strncpy: the truncation is
+     * deliberate, entry was zeroed above so the last byte is already the
+     * terminator, and hostname is a fixed 64-byte array so the read is in
+     * bounds whatever it holds. strncpy here trips -Wstringop-truncation,
+     * which is an error at -O2. */
+    memcpy(entry.hostname_short, peer->hostname, sizeof(entry.hostname_short) - 1);
 
     /* Find existing entry by VPN IP (update) or public key (re-keyed) */
     int slot = -1;
