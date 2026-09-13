@@ -44,3 +44,9 @@ idf_component_register(
     PRIV_REQUIRES
         wireguard_lwip
 )
+
+# At -O2 GCC's inlining lets it see strncpy(dst, src, sizeof(dst) - 1) copy a
+# 63-byte string into a 64-byte field and calls that a possible truncation,
+# although the terminator is written on the next line every time. Forty such
+# copies in this component; a warning per inlining site is noise, not a bug.
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-stringop-truncation)
