@@ -611,6 +611,14 @@ int microlink_get_peer_count(const microlink_t *ml) {
     return ml ? ml->peer_count : 0;
 }
 
+int64_t microlink_get_key_expiry(const microlink_t *ml) {
+    return ml ? ml->key_expiry_epoch : 0;
+}
+
+bool microlink_key_expired(const microlink_t *ml) {
+    return ml ? ml->key_expired : false;
+}
+
 esp_err_t microlink_get_peer_info(const microlink_t *ml, int index, microlink_peer_info_t *info) {
     if (!ml || !info || index < 0 || index >= ml->peer_count) {
         return ESP_ERR_INVALID_ARG;

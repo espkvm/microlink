@@ -190,6 +190,23 @@ int microlink_get_peer_count(const microlink_t *ml);
 const char *microlink_get_self_name(const microlink_t *ml);
 
 /**
+ * @brief When this node's key expires, as the control plane reported it
+ * @return Unix epoch seconds, or 0 when no expiry is known (key expiry
+ *         disabled for the node, or the first MapResponse has not arrived)
+ *
+ * Tailscale caps a node key at six months, so a device that is left alone
+ * falls off the tailnet unless the key is renewed. The date comes from the
+ * self node in the MapResponse; comparing it with the wall clock is the
+ * caller's business (and needs the clock to be set).
+ */
+int64_t microlink_get_key_expiry(const microlink_t *ml);
+
+/**
+ * @brief Whether the control plane has already declared the key expired
+ */
+bool microlink_key_expired(const microlink_t *ml);
+
+/**
  * @brief Get peer info by index
  * @param ml Handle
  * @param index Peer index (0 to peer_count-1)
