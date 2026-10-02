@@ -1206,7 +1206,16 @@ void wireguardif_periodic(struct netif *netif) {
 		}
 	}
 	if (!link_up) {
+		// This runs on the caller's task, not the tcpip thread: take the core
+		// lock for the netif change unless this thread already holds it.
+#if LWIP_TCPIP_CORE_LOCKING
+		bool locked = !sys_thread_tcpip(LWIP_CORE_LOCK_QUERY_HOLDER);
+		if (locked) LOCK_TCPIP_CORE();
 		netif_set_link_down(device->netif);
+		if (locked) UNLOCK_TCPIP_CORE();
+#else
+		netif_set_link_down(device->netif);
+#endif
 	}
 }
 

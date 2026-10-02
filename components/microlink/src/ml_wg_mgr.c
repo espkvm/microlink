@@ -207,7 +207,12 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
     IP_SET_TYPE_VAL(dst, IPADDR_TYPE_V4);
     ip4_addr_set_u32(ip_2_ip4(&dst), dest_ip);  /* already network byte order */
 
+    /* Keepalives, handshake retries and rekeys come here from wireguardif_periodic()
+     * on the WG manager task, while the tcpip thread may be sending at the
+     * same moment: hold the core lock (a no-op when the caller already has it). */
+    bool _l = ml_lwip_lock();
     err_t err = udp_sendto(s_wg_output_pcb, p, &dst, dest_port);
+    ml_lwip_unlock(_l);
     pbuf_free(p);
     return err;
 }
