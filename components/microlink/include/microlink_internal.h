@@ -59,7 +59,7 @@ extern "C" {
 #define ML_TASK_NET_IO_PRIO     4
 #define ML_TASK_NET_IO_CORE     1
 
-#define ML_TASK_DERP_TX_STACK   (14 * 1024)
+#define ML_TASK_DERP_TX_STACK   (8 * 1024) /* peak 3.2 KB measured */
 #define ML_TASK_DERP_TX_PRIO    3
 #define ML_TASK_DERP_TX_CORE    1
 
