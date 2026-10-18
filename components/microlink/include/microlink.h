@@ -20,6 +20,8 @@
 extern "C" {
 #endif
 
+#define MICROLINK_VERSION "2.2.0"
+
 /* Opaque handle */
 typedef struct microlink_s microlink_t;
 
@@ -27,6 +29,8 @@ typedef struct microlink_s microlink_t;
 typedef struct {
     const char *auth_key;       /* Tailscale auth key (tskey-auth-...) */
     const char *device_name;    /* Device hostname on the tailnet */
+    const char *app_name;       /* Hostinfo App, also shown after the OS ("Linux ESP-KVM") */
+    const char *app_version;    /* Client version shown as "<this> (microlink X)" */
     bool enable_derp;           /* Enable DERP relay (default: true) */
     bool enable_stun;           /* Enable STUN endpoint discovery */
     bool enable_disco;          /* Enable DISCO NAT traversal */

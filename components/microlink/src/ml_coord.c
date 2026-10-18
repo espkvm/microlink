@@ -27,6 +27,7 @@
 #include "esp_timer.h"
 #include "esp_random.h"
 #include "esp_netif.h"
+#include "esp_idf_version.h"
 #include "cJSON.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
@@ -97,6 +98,33 @@ typedef enum {
  * ========================================================================== */
 
 static void parse_cert_domains(microlink_t *ml, cJSON *root);
+
+/* Hostinfo fields every request carries. The admin console shows OS and
+ * OSVersion together, and IPNVersion as the client version. */
+static cJSON *hostinfo_new(microlink_t *ml) {
+    cJSON *h = cJSON_CreateObject();
+    if (!h) return NULL;
+    const char *dev_name = (ml->config.device_name && ml->config.device_name[0]) ? ml->config.device_name : microlink_default_device_name();
+    char ver[64];
+    if (ml->config.app_version && ml->config.app_version[0])
+        snprintf(ver, sizeof(ver), "%s (microlink %s)", ml->config.app_version, MICROLINK_VERSION);
+    else
+        snprintf(ver, sizeof(ver), "microlink %s", MICROLINK_VERSION);
+    char os_ver[64];
+    bool app = ml->config.app_name && ml->config.app_name[0];
+    if (app)
+        snprintf(os_ver, sizeof(os_ver), "%s", ml->config.app_name);
+    else
+        snprintf(os_ver, sizeof(os_ver), "ESP-IDF %s", esp_get_idf_version());
+    cJSON_AddStringToObject(h, "Hostname", dev_name);
+    /* Stays "linux": the control server keys client behaviour on OS. */
+    cJSON_AddStringToObject(h, "OS", "linux");
+    cJSON_AddStringToObject(h, "OSVersion", os_ver);
+    cJSON_AddStringToObject(h, "IPNVersion", ver);
+    if (app) cJSON_AddStringToObject(h, "App", ml->config.app_name);
+    cJSON_AddStringToObject(h, "GoArch", "arm");
+    return h;
+}
 
 static void bytes_to_hex(const uint8_t *bytes, size_t len, char *hex) {
     static const char hextab[] = "0123456789abcdef";
@@ -895,12 +923,7 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
     }
 
     /* Hostinfo */
-    cJSON *hostinfo = cJSON_CreateObject();
-    const char *dev_name = (ml->config.device_name && ml->config.device_name[0]) ? ml->config.device_name : microlink_default_device_name();
-    cJSON_AddStringToObject(hostinfo, "Hostname", dev_name);
-    cJSON_AddStringToObject(hostinfo, "OS", "linux");
-    cJSON_AddStringToObject(hostinfo, "OSVersion", "ESP-IDF");
-    cJSON_AddStringToObject(hostinfo, "GoArch", "arm");
+    cJSON *hostinfo = hostinfo_new(ml);
 
     /* NetInfo inside Hostinfo — control plane reads PreferredDERP from here
      * to populate Node.HomeDERP for other peers */
@@ -1518,12 +1541,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
     cJSON_AddStringToObject(root, "Compress", "");  /* Disable compression */
 
     /* Hostinfo */
-    cJSON *hostinfo = cJSON_CreateObject();
-    const char *dev_name = (ml->config.device_name && ml->config.device_name[0]) ? ml->config.device_name : microlink_default_device_name();
-    cJSON_AddStringToObject(hostinfo, "Hostname", dev_name);
-    cJSON_AddStringToObject(hostinfo, "OS", "linux");
-    cJSON_AddStringToObject(hostinfo, "OSVersion", "ESP-IDF");
-    cJSON_AddStringToObject(hostinfo, "GoArch", "arm");
+    cJSON *hostinfo = hostinfo_new(ml);
     cJSON_AddItemToObject(root, "Hostinfo", hostinfo);
 
     /* NetInfo: tell control plane our preferred DERP region and NAT type.
@@ -2047,13 +2065,8 @@ static int do_start_long_poll(microlink_t *ml, ml_noise_state_t *noise) {
 
     /* Hostinfo - REQUIRED by control plane even for Stream=true.
      * V1 includes this; without it, server may not keep us "online". */
-    cJSON *hostinfo = cJSON_CreateObject();
+    cJSON *hostinfo = hostinfo_new(ml);
     if (hostinfo) {
-        const char *dev_name = (ml->config.device_name && ml->config.device_name[0]) ? ml->config.device_name : microlink_default_device_name();
-        cJSON_AddStringToObject(hostinfo, "Hostname", dev_name);
-        cJSON_AddStringToObject(hostinfo, "OS", "linux");
-        cJSON_AddStringToObject(hostinfo, "OSVersion", "ESP-IDF");
-        cJSON_AddStringToObject(hostinfo, "GoArch", "arm");
         cJSON_AddItemToObject(root, "Hostinfo", hostinfo);
     }
 
@@ -2152,13 +2165,8 @@ static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
     cJSON_AddStringToObject(root, "Compress", "");
 
     /* Hostinfo (required — control plane reads NetInfo from here) */
-    cJSON *hostinfo = cJSON_CreateObject();
+    cJSON *hostinfo = hostinfo_new(ml);
     if (hostinfo) {
-        const char *dev_name = (ml->config.device_name && ml->config.device_name[0]) ? ml->config.device_name : microlink_default_device_name();
-        cJSON_AddStringToObject(hostinfo, "Hostname", dev_name);
-        cJSON_AddStringToObject(hostinfo, "OS", "linux");
-        cJSON_AddStringToObject(hostinfo, "OSVersion", "ESP-IDF");
-        cJSON_AddStringToObject(hostinfo, "GoArch", "arm");
         cJSON_AddItemToObject(root, "Hostinfo", hostinfo);
 
         cJSON *netinfo = cJSON_CreateObject();
