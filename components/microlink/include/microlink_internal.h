@@ -73,7 +73,9 @@ extern "C" {
 #define ML_TASK_WG_MGR_CORE     1
 
 /* Queue depths */
-#define ML_DERP_TX_QUEUE_DEPTH  16
+/* A keyframe through the relay is ~80 packets at once; at 16 most of it was
+ * dropped (oldest first) before the I/O task got to it. */
+#define ML_DERP_TX_QUEUE_DEPTH  64
 #define ML_DISCO_RX_QUEUE_DEPTH 16
 /* Deep enough to hold a TCP window's worth of packets while the manager task
  * is busy with a handshake or a DISCO probe round. The enqueue in

@@ -212,42 +212,41 @@ static int derp_tls_write_all(microlink_t *ml, const uint8_t *data, size_t len) 
     return (int)written;
 }
 
-/* Write a complete DERP frame via TLS */
-static int derp_write_frame(microlink_t *ml, uint8_t type,
-                             const uint8_t *payload, uint32_t len) {
-    /* 5-byte header: 1 type + 4 length (big-endian) */
-    uint8_t header[5];
-    header[0] = type;
-    header[1] = (len >> 24) & 0xFF;
-    header[2] = (len >> 16) & 0xFF;
-    header[3] = (len >> 8) & 0xFF;
-    header[4] = len & 0xFF;
-
-    if (derp_tls_write_all(ml, header, 5) < 0) return -1;
-
-    if (len > 0 && payload) {
-        if (derp_tls_write_all(ml, payload, len) < 0) return -1;
-    }
-    return 0;
+/*
+ * Write a complete DERP frame via TLS: the 5-byte header (type + big-endian
+ * length) and the payload in @p a then @p b. One write, so one TLS record and
+ * one TCP segment; header and payload used to go as two records.
+ */
+static int derp_write_frame2(microlink_t *ml, uint8_t type, const uint8_t *a, size_t a_len,
+                             const uint8_t *b, size_t b_len) {
+    const size_t len = a_len + b_len;
+    uint8_t *frame = malloc(5 + len);
+    if (!frame) return -1;
+    frame[0] = type;
+    frame[1] = (len >> 24) & 0xFF;
+    frame[2] = (len >> 16) & 0xFF;
+    frame[3] = (len >> 8) & 0xFF;
+    frame[4] = len & 0xFF;
+    if (a_len) memcpy(frame + 5, a, a_len);
+    if (b_len) memcpy(frame + 5 + a_len, b, b_len);
+    const int ret = derp_tls_write_all(ml, frame, 5 + len);
+    free(frame);
+    return ret < 0 ? -1 : 0;
 }
 
-/* Send a packet to a peer via DERP */
+static int derp_write_frame(microlink_t *ml, uint8_t type,
+                             const uint8_t *payload, uint32_t len) {
+    return derp_write_frame2(ml, type, payload, payload ? len : 0, NULL, 0);
+}
+
+/* Send a packet to a peer via DERP: SendPacket is the 32-byte dest key + payload */
 static int derp_send_packet(microlink_t *ml, const uint8_t *dest_key,
                               const uint8_t *data, size_t len) {
-    /* SendPacket frame: 32-byte dest key + payload */
-    size_t frame_len = 32 + len;
-    uint8_t *frame = malloc(frame_len);
-    if (!frame) return -1;
-
-    memcpy(frame, dest_key, 32);
-    memcpy(frame + 32, data, len);
-
-    int ret = derp_write_frame(ml, DERP_FRAME_SEND_PACKET, frame, frame_len);
+    int ret = derp_write_frame2(ml, DERP_FRAME_SEND_PACKET, dest_key, 32, data, len);
     if (ret < 0) {
         ESP_LOGW(TAG, "derp_send_packet FAILED: dest=%02x%02x%02x%02x len=%d",
                  dest_key[0], dest_key[1], dest_key[2], dest_key[3], (int)len);
     }
-    free(frame);
     return ret;
 }
 
@@ -487,6 +486,7 @@ void ml_derp_tx_task(void *arg) {
 
     uint32_t frames_rx = 0;
     uint32_t frames_tx = 0;
+    uint32_t bytes_tx = 0, bytes_tx_last = 0;
     uint64_t last_status_ms = 0;
     uint32_t loop_count = 0;
     uint64_t last_heartbeat_ms = 0;
@@ -510,10 +510,13 @@ void ml_derp_tx_task(void *arg) {
         {
             uint64_t now_ms = loop_start;
             if (now_ms - last_status_ms > 10000) {
-                ESP_LOGI(TAG, "DERP status: connected=%d fd=%d rx=%lu tx=%lu loops=%lu",
+                ESP_LOGI(TAG, "DERP status: connected=%d fd=%d rx=%lu tx=%lu loops=%lu tx %lu B/s",
                          ml->derp.connected, ml->derp.sockfd,
                          (unsigned long)frames_rx, (unsigned long)frames_tx,
-                         (unsigned long)loop_count);
+                         (unsigned long)loop_count,
+                         (unsigned long)((bytes_tx - bytes_tx_last) * 1000ull /
+                                         (now_ms - last_status_ms)));
+                bytes_tx_last = bytes_tx;
                 last_status_ms = now_ms;
             }
         }
@@ -575,7 +578,9 @@ void ml_derp_tx_task(void *arg) {
 
         /* ---- Phase 1: Drain TX queue FIRST (prioritize outgoing) ---- */
         {
-            for (int tx_count = 0; tx_count < 8; tx_count++) {
+            /* The whole queue, not a few: one tick of sleep after every eight
+               packets was a ceiling of its own. */
+            for (int tx_count = 0; tx_count < ML_DERP_TX_QUEUE_DEPTH; tx_count++) {
                 ml_derp_tx_item_t item;
                 if (xQueueReceive(ml->derp_tx_queue, &item, 0) != pdTRUE) {
                     break;
@@ -600,6 +605,7 @@ void ml_derp_tx_task(void *arg) {
                     xEventGroupSetBits(ml->events, ML_EVT_DERP_RECONNECT);
                 } else {
                     frames_tx++;
+                    bytes_tx += item.len;
                 }
                 free(item.data);
             }
@@ -718,6 +724,15 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
         return ESP_FAIL;
     }
     ml_freeaddrinfo(res);
+
+    /* No Nagle. Every WireGuard packet through the relay is a TLS record of
+     * its own, and Nagle held each one back until the last was acked - with
+     * the server's delayed ACK that capped the relay at ~60 KB/s and queued
+     * video for a second. The Go client does the same (NoDelay by default). */
+    {
+        int nodelay = 1;
+        ml_setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+    }
 
     int64_t t_derp_tcp = esp_timer_get_time();
     ESP_LOGI(TAG, "[TIMING] DERP TCP connect: %lld ms", (t_derp_tcp - t_derp_dns) / 1000);
