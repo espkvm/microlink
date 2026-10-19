@@ -378,22 +378,25 @@ skip_bsd_socket:
     /* Create tasks */
     BaseType_t ret;
 
-    ret = xTaskCreatePinnedToCore(ml_net_io_task, "ml_net_io", ML_TASK_NET_IO_STACK,
-                                   ml, ML_TASK_NET_IO_PRIO, &ml->net_io_task, ML_TASK_NET_IO_CORE);
+    ret = xTaskCreatePinnedToCoreWithCaps(ml_net_io_task, "ml_net_io", ML_TASK_NET_IO_STACK, ml,
+                                          ML_TASK_NET_IO_PRIO, &ml->net_io_task,
+                                          ML_TASK_NET_IO_CORE, ML_TASK_STACK_CAPS);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create net_io task");
         return ESP_FAIL;
     }
 
-    ret = xTaskCreatePinnedToCore(ml_derp_tx_task, "ml_derp_tx", ML_TASK_DERP_TX_STACK,
-                                   ml, ML_TASK_DERP_TX_PRIO, &ml->derp_tx_task, ML_TASK_DERP_TX_CORE);
+    ret = xTaskCreatePinnedToCoreWithCaps(ml_derp_tx_task, "ml_derp_tx", ML_TASK_DERP_TX_STACK, ml,
+                                          ML_TASK_DERP_TX_PRIO, &ml->derp_tx_task,
+                                          ML_TASK_DERP_TX_CORE, ML_TASK_STACK_CAPS);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create derp_tx task");
         return ESP_FAIL;
     }
 
-    ret = xTaskCreatePinnedToCore(ml_coord_task, "ml_coord", ML_TASK_COORD_STACK,
-                                   ml, ML_TASK_COORD_PRIO, &ml->coord_task, ML_TASK_COORD_CORE);
+    ret = xTaskCreatePinnedToCoreWithCaps(ml_coord_task, "ml_coord", ML_TASK_COORD_STACK, ml,
+                                          ML_TASK_COORD_PRIO, &ml->coord_task,
+                                          ML_TASK_COORD_CORE, ML_TASK_STACK_CAPS);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create coord task");
         return ESP_FAIL;

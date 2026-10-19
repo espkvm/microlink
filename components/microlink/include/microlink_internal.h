@@ -72,6 +72,17 @@ extern "C" {
 #define ML_TASK_WG_MGR_PRIO     4
 #define ML_TASK_WG_MGR_CORE     1
 
+/* With PSRAM, net_io, derp_tx and coord keep their stacks there: 28 KB less
+ * internal RAM, which the rest of the firmware is short of. They never touch
+ * flash, which a task with a PSRAM stack must not do. wg_mgr saves peers to
+ * NVS, so its stack stays internal. Tasks made this way end themselves with
+ * vTaskDeleteWithCaps(NULL). */
+#ifdef CONFIG_SPIRAM
+#define ML_TASK_STACK_CAPS      (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+#else
+#define ML_TASK_STACK_CAPS      (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+#endif
+
 /* Queue depths */
 /* A keyframe through the relay is ~80 packets at once; at 16 most of it was
  * dropped (oldest first) before the I/O task got to it. */
