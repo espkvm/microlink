@@ -1053,7 +1053,6 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
     }
 
     /* Parse H2 frames from accumulated buffer */
-    bool got_end_stream = false;
     int fpos = 0;
     while (fpos + 9 <= (int)h2_resp_len) {
         uint32_t f_len = (h2_resp[fpos] << 16) | (h2_resp[fpos + 1] << 8) | h2_resp[fpos + 2];
@@ -1079,9 +1078,7 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
                     memcpy(resp_buf + resp_total, h2_resp + fpos, f_len);
                     resp_total += f_len;
                 }
-                if (f_flags & 0x01) got_end_stream = true;
             }
-            if (f_type == 0x01 && (f_flags & 0x01)) got_end_stream = true;
         }
 
         fpos += f_len;

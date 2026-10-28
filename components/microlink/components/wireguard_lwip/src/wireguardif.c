@@ -57,7 +57,7 @@
 #if WG_DEBUG_LOGGING
 #define WG_DEBUG(...) do { printf(__VA_ARGS__); fflush(stdout); } while(0)
 #else
-#define WG_DEBUG(...) do {} while(0)
+#define WG_DEBUG(...) do { if (0) printf(__VA_ARGS__); } while(0)
 #endif
 
 #define WIREGUARDIF_TIMER_MSECS 400
