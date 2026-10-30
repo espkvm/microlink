@@ -655,6 +655,17 @@ static void process_peer_updates(microlink_t *ml) {
                     if (update->derp_region > 0) {
                         p->derp_region = update->derp_region;
                     }
+                    static const uint8_t zero_key[32] = {0};
+                    if (memcmp(update->disco_key, zero_key, 32) != 0 &&
+                        memcmp(update->disco_key, p->disco_key, 32) != 0) {
+                        /* The peer restarted: its old direct path is gone too. */
+                        memcpy(p->disco_key, update->disco_key, 32);
+                        p->has_direct_path = false;
+                        p->trust_until_ms = 0;
+                        p->tried_initial_handshake = false;
+                        ESP_LOGI(TAG, "Peer %s has a new disco key", p->hostname);
+                        ml_peer_nvs_save(p);
+                    }
                     ESP_LOGI(TAG, "Peer patched: %s (eps=%d derp=%d)",
                              p->hostname, p->endpoint_count, p->derp_region);
                 }
@@ -1043,6 +1054,16 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
     /* Extract sender's disco public key */
     const uint8_t *sender_disco_key = pkt->data + 6;
 
+    /* Our own ping, back from a peer whose endpoint is one of our addresses
+     * (a stale node of this device, say). It is sealed to that peer's key. */
+    if (memcmp(sender_disco_key, ml->disco_public_key, 32) == 0) {
+        ESP_LOGD(TAG, "DISCO from ourselves via %d.%d.%d.%d:%d, dropped",
+                 (int)((pkt->src_ip >> 24) & 0xFF), (int)((pkt->src_ip >> 16) & 0xFF),
+                 (int)((pkt->src_ip >> 8) & 0xFF), (int)(pkt->src_ip & 0xFF),
+                 (int)pkt->src_port);
+        return;
+    }
+
     /* Extract nonce */
     const uint8_t *nonce = pkt->data + 38;
 
@@ -1058,7 +1079,12 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
 
     if (nacl_box_open(plaintext, ciphertext, ciphertext_len, nonce,
                       sender_disco_key, ml->disco_private_key) != 0) {
-        ESP_LOGW(TAG, "DISCO decrypt failed");
+        ESP_LOGW(TAG, "DISCO decrypt failed from %d.%d.%d.%d:%d (via %s, disco_key=%02x%02x%02x%02x)",
+                 (int)((pkt->src_ip >> 24) & 0xFF), (int)((pkt->src_ip >> 16) & 0xFF),
+                 (int)((pkt->src_ip >> 8) & 0xFF), (int)(pkt->src_ip & 0xFF),
+                 (int)pkt->src_port, pkt->via_derp ? "DERP" : "direct",
+                 sender_disco_key[0], sender_disco_key[1],
+                 sender_disco_key[2], sender_disco_key[3]);
         free(plaintext);
         return;
     }

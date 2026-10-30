@@ -1401,6 +1401,16 @@ check_removed:
                         }
                     }
 
+                    /* A new disco key means the peer restarted. Without it its
+                     * CallMeMaybe and pings match no peer, and the path stays on
+                     * DERP. Left all zero when the patch has none. */
+                    cJSON *patch_disco = cJSON_GetObjectItem(patch, "DiscoKey");
+                    if (patch_disco && patch_disco->valuestring) {
+                        const char *dk = patch_disco->valuestring;
+                        if (strncmp(dk, "discokey:", 9) == 0) dk += 9;
+                        hex_to_bytes(dk, update->disco_key, 32);
+                    }
+
                     /* Parse endpoints if present */
                     cJSON *endpoints = cJSON_GetObjectItem(patch, "Endpoints");
                     if (endpoints) {
