@@ -78,9 +78,20 @@ static int hpack_literal_indexed(uint8_t *out, int name_index,
     /* 6-bit prefix, bit pattern 01 */
     out[pos++] = 0x40 | (name_index & 0x3F);
 
-    /* Value string (huffman=0) */
+    /* Value string (huffman=0); the length is a 7-bit prefix integer
+     * (RFC 7541 5.1), so 127 and up take more bytes. */
     size_t vlen = strlen(value);
-    out[pos++] = (uint8_t)vlen;
+    if (vlen < 127) {
+        out[pos++] = (uint8_t)vlen;
+    } else {
+        out[pos++] = 127;
+        size_t rest = vlen - 127;
+        while (rest >= 128) {
+            out[pos++] = (uint8_t)(0x80 | (rest & 0x7F));
+            rest >>= 7;
+        }
+        out[pos++] = (uint8_t)rest;
+    }
     memcpy(out + pos, value, vlen);
     pos += vlen;
     return pos;
@@ -172,8 +183,12 @@ int ml_h2_build_headers_frame(uint8_t *out, size_t out_size,
                                 uint32_t stream_id, bool end_stream) {
     if (out_size < 128) return -1;
 
-    /* Build HPACK payload first, then prepend header */
-    uint8_t hpack[256];
+    /* Build HPACK payload first, then prepend header. Each literal takes at
+     * most its length + 4 bytes. */
+    size_t need = strlen(method) + strlen(path) + (authority ? strlen(authority) : 0) +
+                  (content_type ? strlen(content_type) : 0) + 4 * 4 + 1;
+    uint8_t hpack[640];
+    if (need > sizeof(hpack)) return -1;
     int hpack_len = 0;
 
     /* :method */
@@ -205,7 +220,7 @@ int ml_h2_build_headers_frame(uint8_t *out, size_t out_size,
         hpack_len += hpack_literal_indexed(hpack + hpack_len, HPACK_CONTENT_TYPE, content_type);
     }
 
-    if (hpack_len > 256) {
+    if ((size_t)hpack_len + 9 > out_size) {
         ESP_LOGE(TAG, "HPACK too large: %d", hpack_len);
         return -1;
     }

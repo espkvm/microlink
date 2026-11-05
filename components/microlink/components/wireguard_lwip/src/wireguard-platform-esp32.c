@@ -10,6 +10,14 @@
 #include <string.h>
 #include <sys/time.h>
 
+/* Seconds to count from before the clock is set: at least what an earlier
+ * boot may have sent (see wireguard_set_tai64n_base_seconds). */
+static uint64_t s_tai_base;
+
+void wireguard_set_tai64n_base_seconds(uint64_t base) {
+    s_tai_base = base;
+}
+
 /* ============================================================================
  * Time Functions
  * ========================================================================== */
@@ -29,12 +37,14 @@ void wireguard_tai64n_now(uint8_t *output) {
     // us with "handshake replay" until our uptime passes the previous session's
     // — a device that ran for hours cannot reconnect at all after a reboot.
     // The system clock is expected to be set (e.g. by SNTP) before connecting.
-    // Before it is (still in 1970), fall back to uptime: no worse than before.
+    // Before it is (still in 1970), count from a floor kept across boots
+    // plus the uptime, so the stamp is still above what peers saw from us
+    // when an earlier boot had the right time (after Csontikka 9e07d8f).
     struct timeval tv;
     gettimeofday(&tv, NULL);
     if (tv.tv_sec < 1577836800) { /* 2020-01-01 */
         uint64_t now_us = esp_timer_get_time();
-        tv.tv_sec = (time_t)(now_us / 1000000ULL);
+        tv.tv_sec = (time_t)(s_tai_base + now_us / 1000000ULL);
         tv.tv_usec = (suseconds_t)(now_us % 1000000ULL);
     }
     uint64_t seconds = (uint64_t)tv.tv_sec;

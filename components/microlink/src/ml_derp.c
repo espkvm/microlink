@@ -23,6 +23,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_random.h"
+#include "esp_crt_bundle.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 #include "mbedtls/net_sockets.h"
@@ -491,6 +492,8 @@ void ml_derp_tx_task(void *arg) {
     uint32_t loop_count = 0;
     uint64_t last_heartbeat_ms = 0;
     uint64_t connected_since_ms = 0;
+    uint32_t retry_ms = 5000;        /* next pause before a reconnect attempt */
+    uint64_t retry_at_ms = 0;        /* when to try, 0 = not scheduled */
     bool verbose_phase = false;  /* verbose logging for first 15s after connect */
 
     while (!(xEventGroupGetBits(ml->events) & ML_EVT_SHUTDOWN_REQUEST)) {
@@ -570,6 +573,39 @@ void ml_derp_tx_task(void *arg) {
             verbose_phase = false;
         }
 
+        /* Once the relay was wanted, keep trying: three attempts and then
+         * nothing left the device without a relay until the control
+         * connection happened to reconnect. 5 s doubling to 60 s
+         * (Csontikka 46e3491). */
+        if ((xEventGroupGetBits(ml->events) & ML_EVT_COORD_REGISTERED) && !ml->derp.connected) {
+            const uint64_t now_ms = ml_get_time_ms();
+            if (retry_at_ms == 0) {
+                retry_at_ms = now_ms + retry_ms;
+            } else if (now_ms >= retry_at_ms) {
+                ESP_LOGW(TAG, "DERP down, trying again (every %lu s)", (unsigned long)(retry_ms / 1000));
+                if (ml_derp_connect(ml) == ESP_OK) {
+                    connected_since_ms = ml_get_time_ms();
+                    retry_ms = 5000;
+                    retry_at_ms = 0;
+                } else {
+                    retry_ms = retry_ms * 2 > 60000 ? 60000 : retry_ms * 2;
+                    retry_at_ms = now_ms + retry_ms;
+                }
+            }
+        } else if (ml->derp.connected) {
+            retry_ms = 5000;
+            retry_at_ms = 0;
+            /* The relay sends a keepalive every minute. 90 s of nothing on a
+             * "connected" relay is a dead one: last_recv_ms was written and
+             * never read. */
+            if (ml->derp.last_recv_ms && ml_get_time_ms() - ml->derp.last_recv_ms > 90000) {
+                ESP_LOGW(TAG, "DERP silent for 90 s, reconnecting");
+                ml->derp.connected = false;
+                xEventGroupSetBits(ml->events, ML_EVT_DERP_RECONNECT);
+                continue;
+            }
+        }
+
         if (!ml->derp.connected) {
             /* Not connected - just wait and check again */
             vTaskDelay(pdMS_TO_TICKS(100));
@@ -641,6 +677,7 @@ void ml_derp_tx_task(void *arg) {
     }
 
     ESP_LOGI(TAG, "DERP I/O task exiting");
+    ml_task_exiting(ml);
     vTaskDeleteWithCaps(NULL);
 }
 
@@ -665,6 +702,7 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
      * NOT on connection failure (to avoid bouncing between nodes). */
     const char *derp_host = ML_DERP_HOST;
     int derp_port = ML_DERP_PORT;
+    const ml_derp_node_t *derp_node = NULL;   /* the node dialled, for its TLS settings */
 
     if (ml->derp_region_count > 0 && ml->derp_home_region > 0) {
         for (int i = 0; i < ml->derp_region_count; i++) {
@@ -675,6 +713,7 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
                     if (!ml->derp_regions[i].nodes[attempt].stun_only &&
                         ml->derp_regions[i].nodes[attempt].hostname[0]) {
                         derp_host = ml->derp_regions[i].nodes[attempt].hostname;
+                        derp_node = &ml->derp_regions[i].nodes[attempt];
                         if (ml->derp_regions[i].nodes[attempt].derp_port > 0) {
                             derp_port = ml->derp_regions[i].nodes[attempt].derp_port;
                         }
@@ -755,7 +794,24 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
         derp_connect_fail(ml, sock);
         return ESP_FAIL;
     }
-    mbedtls_ssl_conf_authmode(&ml->derp.ssl_conf, MBEDTLS_SSL_VERIFY_NONE);
+    /* Check the relay's certificate against the CA bundle and the node's
+     * name, as derphttp does. It was VERIFY_NONE: anyone on the path could
+     * read the relay protocol (who talks to whom, DISCO, handshakes; the
+     * WireGuard payload stays encrypted). A DERPMap node may name another
+     * CertName or turn the check off with InsecureForTests (Csontikka 4347c76). */
+    const bool verify_tls = !(derp_node && derp_node->insecure_for_tests);
+    const char *tls_name = (derp_node && derp_node->cert_name[0]) ? derp_node->cert_name : derp_host;
+    if (verify_tls) {
+        mbedtls_ssl_conf_authmode(&ml->derp.ssl_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+        if (esp_crt_bundle_attach(&ml->derp.ssl_conf) != ESP_OK) {
+            ESP_LOGE(TAG, "DERP TLS: CA bundle attach failed");
+            derp_connect_fail(ml, sock);
+            return ESP_FAIL;
+        }
+    } else {
+        ESP_LOGW(TAG, "DERP TLS: certificate check off for %s (InsecureForTests)", derp_host);
+        mbedtls_ssl_conf_authmode(&ml->derp.ssl_conf, MBEDTLS_SSL_VERIFY_NONE);
+    }
     /* mbedTLS 4 removed mbedtls_ssl_conf_rng(); the SSL layer draws randomness
      * from the PSA subsystem (initialised above) automatically. */
     mbedtls_ssl_conf_read_timeout(&ml->derp.ssl_conf, DERP_CONNECT_TIMEOUT_MS);
@@ -765,7 +821,7 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
         derp_connect_fail(ml, sock);
         return ESP_FAIL;
     }
-    mbedtls_ssl_set_hostname(&ml->derp.ssl, derp_host);
+    mbedtls_ssl_set_hostname(&ml->derp.ssl, tls_name);   /* SNI and the name check */
     /* Store socket fd BEFORE setting bio.
      * Use custom BIO callbacks that route through ml_read_sock/ml_write_sock,
      * which transparently support both lwIP and AT socket backends.
@@ -782,7 +838,12 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
         }
         char err_buf[128];
         mbedtls_strerror(ret, err_buf, sizeof(err_buf));
-        ESP_LOGE(TAG, "TLS handshake failed: %s", err_buf);
+        if (ret == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED || ret == MBEDTLS_ERR_X509_FATAL_ERROR) {
+            ESP_LOGE(TAG, "DERP TLS: certificate of %s rejected (expected %s): %s",
+                     derp_host, tls_name, err_buf);
+        } else {
+            ESP_LOGE(TAG, "TLS handshake failed: %s", err_buf);
+        }
         derp_connect_fail(ml, sock);
         ml->derp.sockfd = -1;
         return ESP_FAIL;
@@ -1074,7 +1135,8 @@ void ml_derp_disconnect(microlink_t *ml) {
 
     /* Drain TX queue */
     ml_derp_tx_item_t item;
-    while (xQueueReceive(ml->derp_tx_queue, &item, 0) == pdTRUE) {
+    /* The queue may not exist when init failed half-way (Csontikka 6a43400). */
+    while (ml->derp_tx_queue && xQueueReceive(ml->derp_tx_queue, &item, 0) == pdTRUE) {
         free(item.data);
     }
 

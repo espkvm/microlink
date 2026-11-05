@@ -158,7 +158,7 @@ void ml_net_io_task(void *arg) {
                                     MSG_DONTWAIT,
                                     (struct sockaddr *)&src_addr, &addr_len);
                 if (n <= 0) break;
-                uint8_t *pkt_data = malloc(n);
+                uint8_t *pkt_data = ml_psram_malloc(n);  /* not internal RAM (Csontikka b3d56f9) */
                 if (!pkt_data) break;
                 memcpy(pkt_data, udp_buf, n);
                 uint32_t src_ip = ntohl(src_addr.sin_addr.s_addr);
@@ -174,7 +174,7 @@ void ml_net_io_task(void *arg) {
             int n = ml_recvfrom(ml->stun_sock, udp_buf, sizeof(udp_buf), 0,
                              (struct sockaddr *)&src_addr, &addr_len);
             if (n > 0) {
-                uint8_t *pkt_data = malloc(n);
+                uint8_t *pkt_data = ml_psram_malloc(n);  /* not internal RAM (Csontikka b3d56f9) */
                 if (pkt_data) {
                     memcpy(pkt_data, udp_buf, n);
                     ml_rx_packet_t pkt = {
@@ -198,7 +198,7 @@ void ml_net_io_task(void *arg) {
             int n = ml_recvfrom(ml->stun_sock6, udp_buf, sizeof(udp_buf), 0,
                              (struct sockaddr *)&src_addr6, &addr_len);
             if (n > 0) {
-                uint8_t *pkt_data = malloc(n);
+                uint8_t *pkt_data = ml_psram_malloc(n);  /* not internal RAM (Csontikka b3d56f9) */
                 if (pkt_data) {
                     memcpy(pkt_data, udp_buf, n);
                     ml_rx_packet_t pkt = {
@@ -217,5 +217,6 @@ void ml_net_io_task(void *arg) {
     }
 
     ESP_LOGI(TAG, "Net I/O task exiting");
+    ml_task_exiting(ml);
     vTaskDeleteWithCaps(NULL);
 }

@@ -18,6 +18,7 @@
 #include "cJSON.h"
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 #include <fcntl.h>
 #include "lwip/sockets.h"
 
@@ -152,6 +153,38 @@ esp_err_t microlink_factory_reset(void) {
  * Public API
  * ========================================================================== */
 
+void wireguard_set_tai64n_base_seconds(uint64_t base);
+
+/*
+ * The handshake timestamp before the clock is set. Peers drop an initiation
+ * whose timestamp is not above the last one they saw from us, so an unsynced
+ * boot must not start from uptime alone: it starts a day above the floor kept
+ * in NVS, and a synced boot raises the floor to real time (Csontikka 9e07d8f).
+ */
+static void tai64n_floor_init(void) {
+    time_t wallclock = 0;
+    time(&wallclock);
+    uint64_t base = 0;
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        return;
+    }
+    uint64_t prev = 0;
+    size_t sz = sizeof(prev);
+    nvs_get_blob(h, "wg_tai_base", &prev, &sz);
+    if (wallclock > 1700000000) {
+        base = (uint64_t)wallclock > prev ? (uint64_t)wallclock : prev + 1;
+    } else {
+        base = prev + 86400ULL;
+    }
+    if (base > prev) {
+        nvs_set_blob(h, "wg_tai_base", &base, sizeof(base));
+        nvs_commit(h);
+    }
+    nvs_close(h);
+    wireguard_set_tai64n_base_seconds(base);
+}
+
 microlink_t *microlink_init(const microlink_config_t *config) {
     if (!config || !config->auth_key) {
         ESP_LOGE(TAG, "Invalid config: auth_key required");
@@ -164,6 +197,8 @@ microlink_t *microlink_init(const microlink_config_t *config) {
         .free_fn = free
     };
     cJSON_InitHooks(&hooks);
+
+    tai64n_floor_init();
 
     /* Allocate context from PSRAM */
     microlink_t *ml = ml_psram_calloc(1, sizeof(microlink_t));
@@ -385,6 +420,7 @@ skip_bsd_socket:
         ESP_LOGE(TAG, "Failed to create net_io task");
         return ESP_FAIL;
     }
+    __atomic_add_fetch(&ml->tasks_alive, 1, __ATOMIC_SEQ_CST);
 
     ret = xTaskCreatePinnedToCoreWithCaps(ml_derp_tx_task, "ml_derp_tx", ML_TASK_DERP_TX_STACK, ml,
                                           ML_TASK_DERP_TX_PRIO, &ml->derp_tx_task,
@@ -393,6 +429,7 @@ skip_bsd_socket:
         ESP_LOGE(TAG, "Failed to create derp_tx task");
         return ESP_FAIL;
     }
+    __atomic_add_fetch(&ml->tasks_alive, 1, __ATOMIC_SEQ_CST);
 
     ret = xTaskCreatePinnedToCoreWithCaps(ml_coord_task, "ml_coord", ML_TASK_COORD_STACK, ml,
                                           ML_TASK_COORD_PRIO, &ml->coord_task,
@@ -401,6 +438,7 @@ skip_bsd_socket:
         ESP_LOGE(TAG, "Failed to create coord task");
         return ESP_FAIL;
     }
+    __atomic_add_fetch(&ml->tasks_alive, 1, __ATOMIC_SEQ_CST);
 
     ret = xTaskCreatePinnedToCore(ml_wg_mgr_task, "ml_wg_mgr", ML_TASK_WG_MGR_STACK,
                                    ml, ML_TASK_WG_MGR_PRIO, &ml->wg_mgr_task, ML_TASK_WG_MGR_CORE);
@@ -408,6 +446,7 @@ skip_bsd_socket:
         ESP_LOGE(TAG, "Failed to create wg_mgr task");
         return ESP_FAIL;
     }
+    __atomic_add_fetch(&ml->tasks_alive, 1, __ATOMIC_SEQ_CST);
 
     /* WiFi is expected to be connected before microlink_start() is called.
      * Signal the event so coord/wg_mgr tasks proceed immediately. */
@@ -522,12 +561,39 @@ esp_err_t microlink_stop(microlink_t *ml) {
     ESP_LOGI(TAG, "Stopping...");
     xEventGroupSetBits(ml->events, ML_EVT_SHUTDOWN_REQUEST);
 
+    /* Wake any task blocked in a socket call (a DERP TLS handshake, a coord
+     * read) so it sees the shutdown bit now. shutdown(), not close(): the fd
+     * stays valid and each task still closes its own (Csontikka 27806be). A
+     * coord task in its reconnect backoff waits on the command queue. */
+    if (ml->derp.sockfd >= 0) shutdown(ml->derp.sockfd, SHUT_RDWR);
+    if (ml->coord_sock >= 0) shutdown(ml->coord_sock, SHUT_RDWR);
+    if (ml->coord_cmd_queue) {
+        ml_coord_cmd_t stop_cmd = ML_CMD_DISCONNECT;
+        xQueueSend(ml->coord_cmd_queue, &stop_cmd, 0);
+    }
+
     /* Wait for tasks to exit (they check ML_EVT_SHUTDOWN_REQUEST).
      * Tasks call vTaskDelete(NULL) to self-delete, so we must NOT call
      * vTaskDelete() on them again — that causes a crash in uxListRemove
-     * because the task's list node is already invalid. Just wait and
-     * NULL the handles. */
-    vTaskDelay(pdMS_TO_TICKS(3000));
+     * because the task's list node is already invalid. Wait for them to
+     * sign off (ml_task_exiting), bounded: the longest legitimate holdout is
+     * a blocking DNS lookup or TLS handshake, well inside 15 s. */
+    {
+        const int max_wait_ms = 15000;
+        int waited = 0;
+        while (__atomic_load_n(&ml->tasks_alive, __ATOMIC_SEQ_CST) > 0 && waited < max_wait_ms) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            waited += 50;
+        }
+        const int left = __atomic_load_n(&ml->tasks_alive, __ATOMIC_SEQ_CST);
+        if (left > 0) {
+            ESP_LOGE(TAG, "%d task(s) still running %d ms after the stop request; "
+                          "the instance will be leaked rather than freed under them", left, waited);
+            ml->stop_incomplete = true;
+        } else {
+            ESP_LOGI(TAG, "All tasks exited (%d ms)", waited);
+        }
+    }
 
     ml->net_io_task = NULL;
     ml->derp_tx_task = NULL;
@@ -549,6 +615,12 @@ esp_err_t microlink_stop(microlink_t *ml) {
     if (ml->stun_sock >= 0) { ml_close_sock(ml->stun_sock); ml->stun_sock = -1; }
     if (ml->stun_sock6 >= 0) { ml_close_sock(ml->stun_sock6); ml->stun_sock6 = -1; }
 
+    /* A task that outlived the wait still runs on this instance: not IDLE,
+     * or a start would build a second set of tasks on top (Csontikka ee47277). */
+    if (ml->stop_incomplete) {
+        ml->state = ML_STATE_ERROR;
+        return ESP_ERR_TIMEOUT;
+    }
     ml->state = ML_STATE_IDLE;
     ESP_LOGI(TAG, "Stopped");
     return ESP_OK;
@@ -558,6 +630,20 @@ void microlink_destroy(microlink_t *ml) {
     if (!ml) return;
 
     microlink_stop(ml);
+    if (ml->stop_incomplete) {
+        /* A task still runs on this instance: freeing it is the crash we are
+         * avoiding. A leaked instance is the lesser evil, and loud. */
+        ESP_LOGE(TAG, "Destroy skipped: a task still runs on this instance (leaked on purpose)");
+        return;
+    }
+    /* The tasks are gone: release the DERP TLS state they left behind. */
+    if (ml->derp.sockfd >= 0) {
+        ml_derp_disconnect(ml);
+    }
+    free(ml->h2_acc);
+    ml->h2_acc = NULL;
+    free(ml->lp_acc);
+    ml->lp_acc = NULL;
 
     /* Deinitialize peer NVS */
     ml_peer_nvs_deinit();
@@ -566,6 +652,20 @@ void microlink_destroy(microlink_t *ml) {
     if (ml->config_httpd) {
         ml_config_httpd_deinit(ml->config_httpd);
         ml->config_httpd = NULL;
+    }
+
+    /* Packets still queued for the disco / wg / stun consumers own heap memory. */
+    {
+        ml_rx_packet_t pkt;
+        QueueHandle_t rxq[] = { ml->disco_rx_queue, ml->wg_rx_queue, ml->stun_rx_queue };
+        for (size_t i = 0; i < sizeof(rxq) / sizeof(rxq[0]); i++) {
+            if (!rxq[i]) continue;
+            while (xQueueReceive(rxq[i], &pkt, 0) == pdTRUE) free(pkt.data);
+        }
+        ml_peer_update_t *upd;
+        if (ml->peer_update_queue) {
+            while (xQueueReceive(ml->peer_update_queue, &upd, 0) == pdTRUE) free(upd);
+        }
     }
 
     /* Delete queues */
@@ -592,6 +692,10 @@ void microlink_destroy(microlink_t *ml) {
 /* ============================================================================
  * State Queries
  * ========================================================================== */
+
+void ml_task_exiting(microlink_t *ml) {
+    if (ml) __atomic_sub_fetch(&ml->tasks_alive, 1, __ATOMIC_SEQ_CST);
+}
 
 microlink_state_t microlink_get_state(const microlink_t *ml) {
     return ml ? ml->state : ML_STATE_IDLE;
@@ -668,7 +772,52 @@ esp_err_t microlink_get_peer_info(const microlink_t *ml, int index, microlink_pe
     memcpy(info->public_key, p->public_key, 32);
     info->online = p->active;
     info->direct_path = p->has_direct_path;
+    info->net_online = p->net_online;
+    info->user[0] = '\0';
+    info->user_display[0] = '\0';
+    for (int i = 0; p->user_id && i < ml->user_count; i++) {
+        if (ml->users[i].id == p->user_id) {
+            snprintf(info->user, sizeof(info->user), "%s", ml->users[i].login);
+            snprintf(info->user_display, sizeof(info->user_display), "%s", ml->users[i].display);
+            break;
+        }
+    }
+    info->rtt_ms = p->rtt_ms;
+    info->rtt_direct = p->rtt_direct;
+    info->endpoint_ip = p->has_direct_path ? p->best_ip : 0;
+    info->endpoint_port = p->has_direct_path ? p->best_port : 0;
+    info->derp_region = p->derp_region;
     return ESP_OK;
+}
+
+void microlink_get_derp_code(const microlink_t *ml, uint16_t region, char code[8]) {
+    code[0] = '\0';
+    if (!ml || !region) return;
+    for (int i = 0; i < ml->derp_region_count; i++) {
+        if (ml->derp_regions[i].region_id == region) {
+            snprintf(code, 8, "%s", ml->derp_regions[i].code);
+            return;
+        }
+    }
+}
+
+uint16_t microlink_get_derp_home(const microlink_t *ml, char code[8]) {
+    if (code) code[0] = '\0';
+    if (!ml) return 0;
+    if (code) microlink_get_derp_code(ml, ml->derp_home_region, code);
+    return ml->derp_home_region;
+}
+
+bool microlink_derp_connected(const microlink_t *ml) {
+    return ml && ml->derp.connected;
+}
+
+const char *microlink_get_login_url(const microlink_t *ml) {
+    return ml ? ml->auth_url : "";
+}
+
+const char *microlink_get_register_error(const microlink_t *ml) {
+    return ml ? ml->reg_error : "";
 }
 
 /* ============================================================================

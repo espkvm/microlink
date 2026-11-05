@@ -46,6 +46,16 @@
 #include "wireguard.h"
 #include "crypto.h"
 #include "lwip_compat.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
+/* Transport packets are encrypted from two tasks: the TCP/IP thread (netif
+ * output) and the WireGuard manager (keepalives, wireguardif_periodic). The
+ * send counter is the AEAD nonce: two packets reading it before either
+ * increments it would share a nonce, which breaks ChaCha20-Poly1305. One
+ * mutex covers "read counter, encrypt, increment" (Csontikka dda3fbe). */
+static SemaphoreHandle_t s_wg_tx_lock;
+static StaticSemaphore_t s_wg_tx_lock_buf;
 
 #include <stdio.h>
 #include <stdbool.h>
@@ -271,6 +281,7 @@ static err_t wireguardif_output_to_peer(struct netif *netif, struct pbuf *q, con
 				hdr->type = MESSAGE_TRANSPORT_DATA;
 				hdr->receiver = keypair->remote_index;
 				// Alignment required... pbuf_alloc has probably aligned data, but want to be sure
+				xSemaphoreTake(s_wg_tx_lock, portMAX_DELAY);
 				U64TO8_LITTLE(hdr->counter, keypair->sending_counter);
 
 				// Copy the encrypted (padded) data to the output packet - chacha20poly1305_encrypt() can encrypt data in-place which avoids call to mem_malloc
@@ -286,6 +297,7 @@ static err_t wireguardif_output_to_peer(struct netif *netif, struct pbuf *q, con
 
 				// Then encrypt
 				wireguard_encrypt_packet(dst, dst, padded_len, keypair);
+				xSemaphoreGive(s_wg_tx_lock);
 
 				WG_DEBUG("[WG_TX] Sending encrypted DATA packet: %u bytes, remote_idx=%lu\n",
 				       (unsigned)pbuf->tot_len, (unsigned long)hdr->receiver);
@@ -379,7 +391,7 @@ static void wireguardif_process_response_message(struct wireguard_device *device
 	WG_DEBUG("[WG] Processing handshake response from %s:%u\n",
 		ip_addr_isany(addr) ? "DERP" : ipaddr_ntoa(addr), port);
 
-	if (wireguard_process_handshake_response(device, peer, response)) {
+	if (wireguard_process_handshake_response(device, peer, response) && wireguard_start_session(peer, true)) {
 		// Packet is good — identify the peer
 		uint8_t wg_idx = wireguard_peer_index(device, peer);
 		printf("[WG] *** HANDSHAKE COMPLETE! wg_idx=%u key=%02x%02x%02x%02x "
@@ -391,7 +403,6 @@ static void wireguardif_process_response_message(struct wireguard_device *device
 		// Update the peer location
 		update_peer_addr(peer, addr, port);
 
-		wireguard_start_session(peer, true);
 		printf("[WG] Session started, sending keepalive to %s:%u\n",
 		       ip_addr_isany(&peer->ip) ? "DERP" : ipaddr_ntoa(&peer->ip), peer->port);
 		wireguardif_send_keepalive(device, peer);
@@ -452,9 +463,8 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 	if (keypair) {
 		if (
 				(keypair->receiving_valid) &&
-				!wireguard_expired(keypair->keypair_millis, REJECT_AFTER_TIME) &&
-				(keypair->sending_counter < REJECT_AFTER_MESSAGES)
-
+				!wireguard_expired(keypair->keypair_millis, REJECT_AFTER_TIME)
+				/* our own sending counter says nothing about what we may still receive */
 		) {
 
 			nonce = U8TO64_LITTLE(data_hdr->counter);
@@ -480,7 +490,7 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 					peer->last_rx = now;
 
 					// Might need to shuffle next key --> current keypair
-					keypair_update(peer, keypair);
+					keypair = keypair_update(peer, keypair);
 
 					// Check to see if we should rekey
 					if (keypair->initiator && wireguard_expired(keypair->keypair_millis, REJECT_AFTER_TIME - peer->keepalive_interval - REKEY_TIMEOUT)) {
@@ -493,8 +503,8 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 					if (pbuf->tot_len > 0) {
 						//4a. Once the packet payload is decrypted, the interface has a plaintext packet. If this is not an IP packet, it is dropped.
 						iphdr = (struct ip_hdr *)pbuf->payload;
-						// Check for packet replay / dupes
-						if (wireguard_check_replay(keypair, nonce)) {
+						// Replay was checked inside wireguard_decrypt_packet; require a complete header before reading it
+						if (pbuf->tot_len >= sizeof(struct ip_hdr)) {
 
 							// 4b. Otherwise, WireGuard checks to see if the source IP address of the plaintext inner-packet routes correspondingly in the cryptokey routing table
 							// Also check packet length!
@@ -557,7 +567,7 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 								       (unsigned)header_len, (unsigned)pbuf->tot_len);
 							}
 						} else {
-							// This is a duplicate packet / replayed / too far out of order
+							// The decrypted packet is too short for an IP header
 						}
 					} else {
 						// This was a keep-alive packet
@@ -615,7 +625,7 @@ static void wireguardif_send_handshake_response(struct wireguard_device *device,
 
 	if (wireguard_create_handshake_response(device, peer, &packet)) {
 
-		wireguard_start_session(peer, false);
+		if (!wireguard_start_session(peer, false)) return;
 
 		// Send this packet out!
 		pbuf = pbuf_alloc(PBUF_TRANSPORT, sizeof(struct message_handshake_response), PBUF_RAM);
@@ -951,6 +961,8 @@ err_t wireguardif_disconnect(struct netif *netif, u8_t peer_index) {
 	if (result == ERR_OK) {
 		// Set the flag that we want to try connecting
 		peer->active = false;
+		peer->send_handshake = false;
+		wireguard_destroy_handshake(peer);
 		// Wipe out current keys
 		keypair_destroy(&peer->next_keypair);
 		keypair_destroy(&peer->curr_keypair);
@@ -964,7 +976,8 @@ err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index, ip_addr_t *cu
 	struct wireguard_peer *peer;
 	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
 	if (result == ERR_OK) {
-		if ((peer->curr_keypair.valid) || (peer->prev_keypair.valid)) {
+		if ((peer->curr_keypair.valid && !wireguard_keypair_expired(&peer->curr_keypair)) ||
+		    (peer->prev_keypair.valid && !wireguard_keypair_expired(&peer->prev_keypair))) {
 			result = ERR_OK;
 		} else {
 			result = ERR_CONN;
@@ -999,6 +1012,22 @@ void wireguardif_shutdown(struct netif *netif) {
 	// Cancel the periodic timer BEFORE freeing any resources
 	// This prevents use-after-free in wireguardif_tmr callback
 	sys_untimeout(wireguardif_tmr, device);
+}
+
+void wireguardif_free(struct netif *netif) {
+	if (!netif || !netif->state) {
+		return;
+	}
+	struct wireguard_device *device = (struct wireguard_device *)netif->state;
+	netif->state = NULL;
+	sys_untimeout(wireguardif_tmr, device);
+	if (device->udp_pcb) {
+		udp_remove(device->udp_pcb);
+		device->udp_pcb = NULL;
+	}
+	// The device holds the private key and every peer's session keys.
+	crypto_zero(device, sizeof(struct wireguard_device));
+	mem_free(device);
 }
 
 // Send to another path (ip NULL = DERP) without a new handshake: the session
@@ -1173,7 +1202,7 @@ static void wireguardif_tmr(void *arg) {
 				keypair_destroy(&peer->next_keypair);
 				keypair_destroy(&peer->curr_keypair);
 				keypair_destroy(&peer->prev_keypair);
-				// TODO: Also destroy handshake?
+				wireguard_destroy_handshake(peer);
 
 				// Revert back to default IP/port if these were altered
 				peer->ip = peer->connect_ip;
@@ -1183,6 +1212,7 @@ static void wireguardif_tmr(void *arg) {
 				// Destroy current keypair
 				keypair_destroy(&peer->curr_keypair);
 			}
+			wireguard_expire_keys(peer);   /* prev/next keys and a stale handshake expire on their own clock */
 			if (should_send_keepalive(peer)) {
 				wireguardif_send_keepalive(device, peer);
 			}
@@ -1212,35 +1242,40 @@ void wireguardif_periodic(struct netif *netif) {
 
 	// Perform the same work as wireguardif_tmr but from the caller's task context,
 	// avoiding heavy crypto (X25519, ChaCha20-Poly1305) on the lwIP TCPIP thread.
+	//
+	// One handshake initiation per call, peers in turn: each costs ~40 ms of
+	// X25519 and AEAD, and several peers due on the same tick blocked the
+	// caller for all of them at once (Csontikka b7442d0).
+	static int s_next_hs_peer = 0;
+	bool handshake_sent = false;
 	bool link_up = false;
-	for (x = 0; x < WIREGUARD_MAX_PEERS; x++) {
+	for (int n = 0; n < WIREGUARD_MAX_PEERS; n++) {
+		x = (s_next_hs_peer + n) % WIREGUARD_MAX_PEERS;
 		peer = &device->peers[x];
 		if (peer->valid) {
 			if (should_reset_peer(peer)) {
 				keypair_destroy(&peer->next_keypair);
 				keypair_destroy(&peer->curr_keypair);
 				keypair_destroy(&peer->prev_keypair);
+				wireguard_destroy_handshake(peer);
 				peer->ip = peer->connect_ip;
 				peer->port = peer->connect_port;
 			}
 			if (should_destroy_current_keypair(peer)) {
 				keypair_destroy(&peer->curr_keypair);
 			}
+			wireguard_expire_keys(peer);
 			if (should_send_keepalive(peer)) {
 				wireguardif_send_keepalive(device, peer);
 			}
-			if (should_send_initiation(peer)) {
-				printf("[WG_PERIODIC] Handshake retry wg_idx=%d key=%02x%02x%02x%02x "
-				       "ip=%s:%u connect_ip=%s:%u active=%d send_hs=%d\n",
-				       x,
-				       peer->public_key[0], peer->public_key[1],
-				       peer->public_key[2], peer->public_key[3],
-				       ip_addr_isany(&peer->ip) ? "0.0.0.0" : ipaddr_ntoa(&peer->ip),
-				       peer->port,
-				       ip_addr_isany(&peer->connect_ip) ? "0.0.0.0" : ipaddr_ntoa(&peer->connect_ip),
-				       peer->connect_port,
-				       peer->active, peer->send_handshake);
+			if (!handshake_sent && should_send_initiation(peer)) {
+				WG_DEBUG("[WG_PERIODIC] Handshake retry wg_idx=%d key=%02x%02x%02x%02x active=%d send_hs=%d\n",
+				         x, peer->public_key[0], peer->public_key[1],
+				         peer->public_key[2], peer->public_key[3],
+				         peer->active, peer->send_handshake);
 				wireguard_start_handshake(device->netif, peer);
+				handshake_sent = true;
+				s_next_hs_peer = (x + 1) % WIREGUARD_MAX_PEERS;
 			}
 			if ((peer->curr_keypair.valid) || (peer->prev_keypair.valid)) {
 				link_up = true;
@@ -1251,6 +1286,7 @@ void wireguardif_periodic(struct netif *netif) {
 }
 
 err_t wireguardif_init(struct netif *netif) {
+	if (!s_wg_tx_lock) s_wg_tx_lock = xSemaphoreCreateMutexStatic(&s_wg_tx_lock_buf);
 	err_t result;
 	struct wireguardif_init_data *init_data;
 	struct wireguard_device *device;

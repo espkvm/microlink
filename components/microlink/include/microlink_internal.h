@@ -100,6 +100,7 @@ extern "C" {
 
 /* Protocol limits */
 #define ML_MAX_PEERS            CONFIG_ML_MAX_PEERS
+#define ML_MAX_USERS            32      /* UserProfiles kept from the netmap */
 #define ML_MAX_ENDPOINTS        8
 #define ML_MAX_PACKET_SIZE      1500
 #define ML_DERP_MAX_FRAME       (ML_MAX_PACKET_SIZE + 64)
@@ -118,6 +119,7 @@ extern "C" {
 #define ML_DISCO_PING_INTERVAL_MS       5000
 #define ML_DISCO_HEARTBEAT_MS           3000
 #define ML_DISCO_TRUST_DURATION_MS      15000
+#define ML_DISCO_BEST_STICKY_MS         6500    /* keep best_ip/port while it answered this recently */
 #define ML_DISCO_PING_TIMEOUT_MS        5000
 #define ML_DISCO_UPGRADE_INTERVAL_MS    15000
 #define ML_DISCO_SESSION_ACTIVE_MS      45000
@@ -229,6 +231,10 @@ typedef struct {
 #define ML_SETDNS_QUEUED  1
 #define ML_SETDNS_SENT    2
 
+/* One control-to-node (c2n) request at a time, answered from coord. */
+#define ML_C2N_METHOD_MAX 8
+#define ML_C2N_PATH_MAX   256
+
 /* ============================================================================
  * Queue Message Types
  * ========================================================================== */
@@ -271,6 +277,9 @@ typedef struct {
     uint8_t disco_key[32];
     char hostname[64];
     uint16_t derp_region;
+    int64_t node_id;            /* Node.ID: patches and removals name the peer by it */
+    int64_t user_id;            /* Node.User, looked up in the UserProfiles */
+    int8_t online;              /* Node.Online: 1, 0, or -1 when the netmap did not say */
     /* Endpoints */
     struct {
         uint32_t ip;
@@ -291,6 +300,9 @@ typedef struct {
     uint8_t disco_key[32];
     char hostname[64];
     bool active;
+    int64_t node_id;
+    int64_t user_id;
+    int8_t net_online;              /* what the netmap says: 1, 0, -1 unknown */
 
     /* Endpoints */
     struct {
@@ -307,6 +319,12 @@ typedef struct {
     uint64_t trust_until_ms;        /* Direct path trusted until */
     uint64_t last_send_ms;          /* Last data sent to this peer */
     uint64_t last_upgrade_ms;       /* Last path upgrade attempt */
+    uint64_t best_last_pong_ms;     /* Last direct PONG from best_ip:best_port itself */
+    uint32_t rtt_ms;                /* Round trip of the last matched DISCO PONG */
+    uint8_t disco_shared[32];       /* NaCl box shared secret with this peer... */
+    uint8_t disco_shared_for[32];   /* ...and the disco key it was derived from */
+    bool disco_shared_valid;
+    bool rtt_direct;                /* ...and whether it came straight, not over DERP */
     uint64_t last_cmm_ms;           /* Last CallMeMaybe we sent */
 
     /* Best direct path */
@@ -319,6 +337,7 @@ typedef struct {
 
     /* On-demand handshake: tried once on first DISCO direct path discovery */
     bool tried_initial_handshake;
+    uint64_t last_init_handshake_ms;   /* last direct-path initiation, for the 30 s retry */
 } ml_peer_t;
 
 /* ============================================================================
@@ -335,6 +354,8 @@ typedef struct {
     uint16_t stun_port;     /* 0 = default 3478 */
     uint16_t derp_port;     /* 0 = default 443 */
     bool stun_only;         /* true if node only serves STUN, not DERP */
+    char cert_name[64];     /* DERPNode.CertName: the name the TLS cert is checked against */
+    bool insecure_for_tests;/* DERPNode.InsecureForTests: no TLS verification, as in Go */
 } ml_derp_node_t;
 
 typedef struct {
@@ -406,6 +427,13 @@ struct microlink_s {
     bool setdns_ok;
     char setdns_err[96];
 
+    /* A c2n request from the last MapResponse, waiting for coord to answer:
+     * its method and path, and where to POST the answer (a path on the
+     * Noise connection). Empty reply_path = nothing pending. */
+    char c2n_method[ML_C2N_METHOD_MAX];
+    char c2n_path[ML_C2N_PATH_MAX];
+    char c2n_reply_path[ML_C2N_PATH_MAX];
+
     /* Event group (cross-task synchronization) */
     EventGroupHandle_t events;
 
@@ -414,6 +442,27 @@ struct microlink_s {
     TaskHandle_t derp_tx_task;
     TaskHandle_t coord_task;
     TaskHandle_t wg_mgr_task;
+    /* Tasks started by microlink_start() that have not signed off yet
+     * (ml_task_exiting). microlink_stop() waits for this to reach zero instead
+     * of sleeping a fixed 3 s: a task still running when destroy freed the
+     * instance was a use-after-free (Csontikka 4843ab0). */
+    volatile int tasks_alive;
+    bool stop_incomplete;           /* a task outlived the stop wait: destroy must not free */
+    uint32_t last_ep_update_hash;   /* FNV-1a of the last endpoint update sent; 0 = none this session */
+
+    /* Who owns each node: the netmap's UserProfiles, kept by ID. */
+    struct {
+        int64_t id;
+        char login[64];
+        char display[48];
+    } users[ML_MAX_USERS];
+    int user_count;
+
+    /* Interactive login: with no auth key the control plane answers the
+     * registration with a URL for a person to open. Empty when not waiting. */
+    char auth_url[160];
+    /* The control plane's reason when it refused the registration. */
+    char reg_error[96];
 
     /* Queues */
     QueueHandle_t derp_tx_queue;        /* -> derp_tx task */
@@ -516,6 +565,16 @@ struct microlink_s {
     /* Control plane host override (empty = use ML_CTRL_HOST default).
      * Set from NVS at boot for Headscale/Ionscale/custom coordinators. */
     char ctrl_host[64];
+    uint8_t ctrl_noise_pubkey[32];  /* a self-hosted server's Noise key, from /key */
+    /* Long-poll reassembly: H2 bytes of a frame a Noise frame cut, and the
+     * stream-5 payload until a whole map message is in. PSRAM, lazily. */
+    uint8_t *h2_acc;
+    size_t h2_acc_len;
+    uint64_t ctrl_stream_rx_ms;     /* last stream-5 DATA: the map session is alive */
+    uint32_t full_maps;             /* whole netmaps applied so far */
+    uint8_t *lp_acc;
+    size_t lp_acc_len;
+    bool ctrl_noise_pubkey_valid;
 
     /* Debug flags (bitmask from NVS, checked at runtime for verbose logging) */
     uint8_t debug_flags;  /* bit 0: DISCO, bit 1: WG, bit 2: DERP, bit 3: coord */
@@ -537,6 +596,11 @@ void ml_net_io_task(void *arg);
 void ml_derp_tx_task(void *arg);
 esp_err_t ml_derp_connect(microlink_t *ml);
 void ml_derp_disconnect(microlink_t *ml);
+
+/* Every microlink task calls this as its LAST statement before deleting
+ * itself: after it returns the task must not touch ml again, because
+ * microlink_stop() may already be tearing the instance down. */
+void ml_task_exiting(microlink_t *ml);
 esp_err_t ml_derp_queue_send(microlink_t *ml, const uint8_t *dest_key,
                               const uint8_t *data, size_t len);
 
@@ -597,6 +661,7 @@ void ml_peer_nvs_deinit(void);
 esp_err_t ml_peer_nvs_save(const ml_peer_t *peer);
 int ml_peer_nvs_load_all(ml_peer_t *peers, int max_peers);
 esp_err_t ml_peer_nvs_clear(void);
+esp_err_t ml_peer_nvs_remove(const uint8_t public_key[32]);
 
 #ifdef CONFIG_ML_ZERO_COPY_WG
 /* ml_zerocopy.c */

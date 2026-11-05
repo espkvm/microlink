@@ -202,6 +202,7 @@ int ml_peer_nvs_load_all(ml_peer_t *peers, int max_peers) {
         p->derp_region = entry->derp_region;
         p->active = true;
         p->wg_peer_index = -1;
+        p->net_online = -1;     /* unknown until the netmap says */
 
         /* Restore hostname (truncated, ensure null-terminated) */
         memcpy(p->hostname, entry->hostname_short, sizeof(entry->hostname_short));
@@ -224,6 +225,20 @@ int ml_peer_nvs_load_all(ml_peer_t *peers, int max_peers) {
 
     ESP_LOGI(TAG, "Loaded %d cached peers from NVS", loaded);
     return loaded;
+}
+
+/* Forget one peer, so a removed or revoked node does not come back from the
+ * cache at the next boot (Csontikka 46e3491). */
+esp_err_t ml_peer_nvs_remove(const uint8_t public_key[32]) {
+    if (!s_initialized || !s_table || !public_key) return ESP_ERR_INVALID_STATE;
+    for (int i = 0; i < s_table->count; i++) {
+        if (memcmp(s_table->entries[i].public_key, public_key, 32) == 0) {
+            s_table->entries[i] = s_table->entries[s_table->count - 1];
+            s_table->count--;
+            return flush_table();
+        }
+    }
+    return ESP_ERR_NOT_FOUND;
 }
 
 esp_err_t ml_peer_nvs_clear(void) {

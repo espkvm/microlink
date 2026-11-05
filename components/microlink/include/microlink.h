@@ -71,6 +71,14 @@ typedef struct {
      * Frankfurt then the built-in default if nothing answers. A non-zero value
      * forces that region id and skips the probe. */
     uint16_t derp_home_region;
+
+    /* Requests the control server sends to the node itself ("c2n"), such as
+     * the admin console asking for the TLS certificate's state. Called from
+     * the coordination task with the method and the path with its query;
+     * writes the JSON body into @p body and returns the HTTP status. NULL:
+     * every request gets 404. Keep it quick, it holds up the long-poll. */
+    int (*c2n_handler)(const char *method, const char *path, char *body, size_t cap, void *arg);
+    void *c2n_arg;
 } microlink_config_t;
 
 /* Peer info (read-only snapshot) */
@@ -80,6 +88,14 @@ typedef struct {
     uint8_t public_key[32];
     bool online;
     bool direct_path;           /* true if communicating via direct UDP */
+    int8_t net_online;          /* the netmap's Online: 1, 0, -1 unknown */
+    char user[64];              /* owner's login name, "" when unknown */
+    char user_display[48];      /* owner's display name */
+    uint32_t rtt_ms;            /* last DISCO round trip, 0 = none yet */
+    bool rtt_direct;            /* that round trip went straight, not over DERP */
+    uint32_t endpoint_ip;       /* the direct path in use (host order), 0 = none */
+    uint16_t endpoint_port;
+    uint16_t derp_region;       /* the peer's home DERP region */
 } microlink_peer_info_t;
 
 /* Connection state */
@@ -239,6 +255,27 @@ bool microlink_key_expired(const microlink_t *ml);
  * @return ESP_OK if valid index
  */
 esp_err_t microlink_get_peer_info(const microlink_t *ml, int index, microlink_peer_info_t *info);
+
+/**
+ * @brief Our home DERP region: its id (0 = none yet), and its short code
+ *        ("fra") in @p code when @p code is not NULL.
+ */
+uint16_t microlink_get_derp_home(const microlink_t *ml, char code[8]);
+
+/** @brief The short code of DERP region @p region ("" when unknown). */
+void microlink_get_derp_code(const microlink_t *ml, uint16_t region, char code[8]);
+
+/** @brief Whether the relay connection is up. */
+bool microlink_derp_connected(const microlink_t *ml);
+
+/**
+ * @brief The login URL while the device waits for a person to approve it
+ *        (no auth key given), "" otherwise.
+ */
+const char *microlink_get_login_url(const microlink_t *ml);
+
+/** @brief Why the control plane refused the last registration, "" if it did not. */
+const char *microlink_get_register_error(const microlink_t *ml);
 
 /**
  * @brief Send UDP data to a peer by VPN IP

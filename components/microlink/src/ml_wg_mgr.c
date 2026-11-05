@@ -383,6 +383,22 @@ static int find_peer_by_disco_key(microlink_t *ml, const uint8_t *disco_key) {
     return -1;
 }
 
+/* The DISCO shared secret with peer p: one X25519 when first needed and
+ * again after its disco key changes, instead of one per packet (~16 ms
+ * each). The reference client keeps it per disco key too (Csontikka
+ * 60e7901). NULL on failure. */
+static const uint8_t *disco_shared_key(microlink_t *ml, ml_peer_t *p) {
+    if (!p->disco_shared_valid || memcmp(p->disco_shared_for, p->disco_key, 32) != 0) {
+        if (nacl_box_beforenm(p->disco_shared, p->disco_key, ml->disco_private_key) != 0) {
+            p->disco_shared_valid = false;
+            return NULL;
+        }
+        memcpy(p->disco_shared_for, p->disco_key, 32);
+        p->disco_shared_valid = true;
+    }
+    return p->disco_shared;
+}
+
 static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     /* Peer allowlist filter: don't waste WG slots on non-allowed peers.
      * Still process updates for existing peers (they may become allowed later). */
@@ -453,6 +469,9 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     strncpy(p->hostname, update->hostname, sizeof(p->hostname) - 1);
     p->hostname[sizeof(p->hostname) - 1] = '\0';
     p->derp_region = update->derp_region;
+    if (update->node_id) p->node_id = update->node_id;
+    if (update->user_id) p->user_id = update->user_id;
+    p->net_online = update->online;
     p->active = true;
 
     /* Copy endpoints */
@@ -467,6 +486,9 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     p->last_ping_sent_ms = 0;
     p->last_pong_recv_ms = 0;
     p->trust_until_ms = 0;
+    p->best_last_pong_ms = 0;
+    p->rtt_ms = 0;
+    p->rtt_direct = false;
     p->last_send_ms = 0;
     p->last_upgrade_ms = 0;
     p->has_direct_path = false;
@@ -603,8 +625,22 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     return idx;
 }
 
+/* The peer an update names: by node key when it has one, else by NodeID
+ * (tailcfg's patches and removals carry only the ID). */
+static int find_update_peer(microlink_t *ml, const ml_peer_update_t *update) {
+    static const uint8_t zero_key[32] = {0};
+    if (memcmp(update->public_key, zero_key, 32) != 0) {
+        return find_peer_by_key(ml, update->public_key);
+    }
+    if (update->node_id == 0) return -1;
+    for (int i = 0; i < ml->peer_count; i++) {
+        if (ml->peers[i].active && ml->peers[i].node_id == update->node_id) return i;
+    }
+    return -1;
+}
+
 static void remove_peer(microlink_t *ml, const ml_peer_update_t *update) {
-    int idx = find_peer_by_key(ml, update->public_key);
+    int idx = find_update_peer(ml, update);
     if (idx < 0) return;
 
     /* Remove from wireguard-lwip */
@@ -619,6 +655,7 @@ static void remove_peer(microlink_t *ml, const ml_peer_update_t *update) {
     microlink_ip_to_str(ml->peers[idx].vpn_ip, ip_str);
     ESP_LOGI(TAG, "Peer removed: %s (%s)", ml->peers[idx].hostname, ip_str);
 
+    ml_peer_nvs_remove(ml->peers[idx].public_key);
     ml->peers[idx].active = false;
 
     /* Compact peer_count */
@@ -641,9 +678,12 @@ static void process_peer_updates(microlink_t *ml) {
         case ML_PEER_UPDATE_ENDPOINT:
             /* Update endpoint/DERP for existing peer (delta patch) */
             {
-                int idx = find_peer_by_key(ml, update->public_key);
+                int idx = find_update_peer(ml, update);
                 if (idx >= 0) {
                     ml_peer_t *p = &ml->peers[idx];
+                    if (update->online >= 0) {
+                        p->net_online = update->online;
+                    }
                     if (update->endpoint_count > 0) {
                         p->endpoint_count = update->endpoint_count;
                         for (int i = 0; i < update->endpoint_count && i < ML_MAX_ENDPOINTS; i++) {
@@ -701,8 +741,9 @@ static void disco_build_ping(microlink_t *ml, int peer_idx,
 
     /* Encrypt with NaCl box: our disco private key -> peer's disco public key */
     uint8_t ciphertext[46 + NACL_BOX_MACBYTES];
-    nacl_box(ciphertext, plaintext, sizeof(plaintext), nonce,
-             p->disco_key, ml->disco_private_key);
+    const uint8_t *shared = disco_shared_key(ml, p);
+    if (!shared) { *out_len = 0; return; }
+    nacl_box_afternm(ciphertext, plaintext, sizeof(plaintext), nonce, shared);
 
     /* Build packet: magic(6) + our_disco_pubkey(32) + nonce(24) + ciphertext(62) = 124 bytes */
     size_t pos = 0;
@@ -762,8 +803,9 @@ static void disco_build_pong(microlink_t *ml, int peer_idx,
 
     /* Encrypt */
     uint8_t ciphertext[32 + NACL_BOX_MACBYTES];
-    nacl_box(ciphertext, plaintext, sizeof(plaintext), nonce,
-             p->disco_key, ml->disco_private_key);
+    const uint8_t *shared = disco_shared_key(ml, p);
+    if (!shared) { *out_len = 0; return; }
+    nacl_box_afternm(ciphertext, plaintext, sizeof(plaintext), nonce, shared);
 
     /* Build packet */
     size_t pos = 0;
@@ -874,50 +916,20 @@ static void process_disco_ping(microlink_t *ml, const ml_rx_packet_t *pkt,
 
     if (pong_len == 0) return;
 
-    /* Send PONG via ALL paths for maximum reachability (matching v1 + tailscaled):
-     * 1. Direct reply to PING source address (opens NAT hole)
-     * 2. All known LAN endpoints (fastest path for same-network)
-     * 3. DERP relay (guaranteed delivery) */
-
+    /* One PONG, back to where the PING came from, as tailscaled's
+     * handlePingLocked does. Sending it also to every LAN endpoint and always
+     * once more over DERP made each extra copy an "unmatched PONG" at the
+     * pinger and cost a relay round trip per PING (Csontikka 6b98797). DERP
+     * only when the PING came over DERP or the direct send fails. */
     bool direct_sent = false;
-
-    /* 1. Direct reply to PING source (if it was direct UDP) */
     if (!pkt->via_derp && pkt->src_ip != 0 && pkt->src_port != 0) {
-        disco_udp_sendto(ml, pong, pong_len, pkt->src_ip, pkt->src_port);
-        direct_sent = true;
+        direct_sent = disco_udp_sendto(ml, pong, pong_len, pkt->src_ip, pkt->src_port) >= 0;
+    }
+    if (!direct_sent) {
+        ml_derp_queue_send(ml, p->public_key, pong, pong_len);
     }
 
-    /* 2. Send to ALL known LAN endpoints (same-network = fastest path) */
-    if (disco_has_udp_path(ml)) {
-        for (int i = 0; i < p->endpoint_count; i++) {
-            if (p->endpoints[i].is_ipv6 || p->endpoints[i].ip == 0) continue;
-            if (!is_lan_ip(p->endpoints[i].ip)) continue;
-            /* Skip if this is the same as the ping source (already sent) */
-            if (p->endpoints[i].ip == pkt->src_ip &&
-                p->endpoints[i].port == pkt->src_port) continue;
-
-            disco_udp_sendto(ml, pong, pong_len, p->endpoints[i].ip, p->endpoints[i].port);
-            direct_sent = true;
-        }
-
-        /* 2b. Also try public endpoints if no LAN worked */
-        if (!direct_sent) {
-            for (int i = 0; i < p->endpoint_count; i++) {
-                if (p->endpoints[i].is_ipv6 || p->endpoints[i].ip == 0) continue;
-                if (is_lan_ip(p->endpoints[i].ip)) continue;
-
-                disco_udp_sendto(ml, pong, pong_len, p->endpoints[i].ip, p->endpoints[i].port);
-                direct_sent = true;
-                break;  /* Only try one public endpoint */
-            }
-        }
-    }
-
-    /* 3. ALWAYS send via DERP (guaranteed delivery, even if direct worked) */
-    ml_derp_queue_send(ml, p->public_key, pong, pong_len);
-
-    ESP_LOGD(TAG, "PONG sent to %s (direct=%s, DERP=yes)",
-             p->hostname, direct_sent ? "yes" : "no");
+    ESP_LOGD(TAG, "PONG sent to %s (%s)", p->hostname, direct_sent ? "direct" : "DERP");
 }
 
 static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
@@ -948,11 +960,27 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
                  pkt->via_derp ? "DERP" : "direct");
 
         p->last_pong_recv_ms = now;
+        p->rtt_ms = (uint32_t)rtt_ms;
+        p->rtt_direct = !pkt->via_derp;
+
+        /* A peer can answer from two addresses (its LAN address and its NAT
+         * mapping both get our ping), and following every PONG made the best
+         * path flap between them. Keep the best while it still answers, as the
+         * reference client does (trustUDPAddrDuration); another address takes
+         * over once it goes quiet (Csontikka 2605bf3). */
+        if (!pkt->via_derp && pkt->src_ip != 0 && p->has_direct_path &&
+            (p->best_ip != pkt->src_ip || p->best_port != pkt->src_port) &&
+            (now - p->best_last_pong_ms) < ML_DISCO_BEST_STICKY_MS) {
+            pending_probes[i].active = false;
+            matched = true;
+            break;
+        }
 
         /* If direct reply, update best path */
         if (!pkt->via_derp && pkt->src_ip != 0) {
             p->best_ip = pkt->src_ip;
             p->best_port = pkt->src_port;
+            p->best_last_pong_ms = now;
             p->has_direct_path = true;
             p->trust_until_ms = now + ML_DISCO_TRUST_DURATION_MS;
 
@@ -998,8 +1026,13 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
                      * Instead, just fire a single handshake init. If the peer
                      * has us configured, it will respond and establish session.
                      * If not, we stop and wait for them to initiate. */
-                    if (!p->tried_initial_handshake) {
+                    /* Again every 30 s while the session is still down: one
+                     * lost initiation used to leave the peer without a session
+                     * for good (Csontikka 5bda178). */
+                    if (!p->tried_initial_handshake ||
+                        now - p->last_init_handshake_ms >= 30000) {
                         p->tried_initial_handshake = true;
+                        p->last_init_handshake_ms = now;
                         /* Store endpoint so wireguardif_connect sends to it */
                         wireguardif_update_endpoint(netif, (u8_t)p->wg_peer_index,
                                                      &ep_ip, pkt->src_port);
@@ -1016,7 +1049,7 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
                                 dev->peers[p->wg_peer_index].active = false;
                             }
                         }
-                        ESP_LOGI(TAG, "WG one-shot handshake to %s (first direct path)", p->hostname);
+                        ESP_LOGI(TAG, "WG handshake to %s over the direct path", p->hostname);
                     }
                 }
             }
@@ -1073,12 +1106,23 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
 
     if (ciphertext_len < NACL_BOX_MACBYTES) return;
 
+    /* Only a known peer's key is worth an X25519: anything else is dropped
+     * before the crypto, as the reference client does. */
+    int sender_idx = find_peer_by_disco_key(ml, sender_disco_key);
+    if (sender_idx < 0) {
+        ESP_LOGD(TAG, "DISCO from an unknown disco key %02x%02x%02x%02x via %s, dropped",
+                 sender_disco_key[0], sender_disco_key[1], sender_disco_key[2],
+                 sender_disco_key[3], pkt->via_derp ? "DERP" : "direct");
+        return;
+    }
+    const uint8_t *shared = disco_shared_key(ml, &ml->peers[sender_idx]);
+    if (!shared) return;
+
     size_t plaintext_len = ciphertext_len - NACL_BOX_MACBYTES;
     uint8_t *plaintext = malloc(plaintext_len);
     if (!plaintext) return;
 
-    if (nacl_box_open(plaintext, ciphertext, ciphertext_len, nonce,
-                      sender_disco_key, ml->disco_private_key) != 0) {
+    if (nacl_box_open_afternm(plaintext, ciphertext, ciphertext_len, nonce, shared) != 0) {
         ESP_LOGW(TAG, "DISCO decrypt failed from %d.%d.%d.%d:%d (via %s, disco_key=%02x%02x%02x%02x)",
                  (int)((pkt->src_ip >> 24) & 0xFF), (int)((pkt->src_ip >> 16) & 0xFF),
                  (int)((pkt->src_ip >> 8) & 0xFF), (int)(pkt->src_ip & 0xFF),
@@ -1120,11 +1164,10 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
                      ml->peers[peer_idx].hostname, ep_count,
                      disco_has_udp_path(ml), ml_at_socket_is_ready());
 
-            /* Reply with our own CallMeMaybe (bidirectional NAT traversal).
-             * Skip on cellular: our endpoints are behind CGNAT and unreachable. */
-            if (!ml_at_socket_is_ready()) {
-                disco_send_call_me_maybe(ml, peer_idx);
-            }
+            /* No CallMeMaybe back: the reference client only pings the
+             * endpoints it was given (those pings open our NAT too), and two
+             * microlink nodes echoing each other kept bouncing CallMeMaybe and
+             * ping bursts for ever (Csontikka 1030fce). */
 
             /* Probe each endpoint with a DISCO ping.
              * Skip on cellular: direct UDP impossible, saves TX queue capacity. */
@@ -1346,8 +1389,9 @@ static void disco_send_call_me_maybe(microlink_t *ml, int peer_idx) {
     esp_fill_random(nonce, DISCO_NONCE_LEN);
 
     uint8_t ciphertext[sizeof(plaintext) + NACL_BOX_MACBYTES];
-    nacl_box(ciphertext, plaintext, pt_len, nonce,
-             p->disco_key, ml->disco_private_key);
+    const uint8_t *shared = disco_shared_key(ml, p);
+    if (!shared) return;
+    nacl_box_afternm(ciphertext, plaintext, pt_len, nonce, shared);
 
     /* Build packet: magic(6) + disco_pubkey(32) + nonce(24) + ciphertext */
     uint8_t pkt[256];
@@ -1594,6 +1638,7 @@ void ml_wg_mgr_task(void *arg) {
 
     if (wait_bits & ML_EVT_SHUTDOWN_REQUEST) {
         ESP_LOGI(TAG, "Shutdown requested before registration, exiting");
+        ml_task_exiting(ml);
         vTaskDelete(NULL);
         return;  /* Not reached */
     }
@@ -1722,9 +1767,11 @@ void ml_wg_mgr_task(void *arg) {
          * yields whenever there is nothing to do. */
     }
 
-    /* Shutdown WireGuard interface */
+    /* Shutdown WireGuard interface. ml->wg_netif goes NULL first so the
+     * accessors stop looking at the netif before it is torn down. */
     if (ml->wg_netif) {
         struct netif *netif = (struct netif *)ml->wg_netif;
+        ml->wg_netif = NULL;
         {
             bool _wl = ml_lwip_lock();
             wireguardif_shutdown(netif);
@@ -1736,12 +1783,15 @@ void ml_wg_mgr_task(void *arg) {
         {
             bool _wl = ml_lwip_lock();
             netif_remove(netif);
+            /* The wireguard_device behind netif->state (every peer's keypairs)
+             * was never released, only the netif around it (Csontikka 70cfeba). */
+            wireguardif_free(netif);
             ml_lwip_unlock(_wl);
         }
         free(netif);
-        ml->wg_netif = NULL;
     }
 
     ESP_LOGI(TAG, "WG Manager task exiting");
+    ml_task_exiting(ml);
     vTaskDelete(NULL);
 }
