@@ -10,6 +10,7 @@ set(SRCS
     "src/ml_udp.c"
     "src/ml_tcp.c"
     "src/ml_peer_nvs.c"
+    "src/ml_packet_filter.c"
     "src/nacl_box.c"
     "src/x25519.c"
     "src/ml_zerocopy.c"

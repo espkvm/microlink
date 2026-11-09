@@ -221,6 +221,32 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
  * WireGuard Interface Initialization
  * ========================================================================== */
 
+/* The tailnet policy on traffic into the tunnel (filter from jetkvm/microlink,
+ * MIT). A packet the policy does not grant is dropped, except replies to UDP
+ * this node sent first; TCP replies pass as continuations. If the lock is
+ * busy, the packet is dropped rather than let through unchecked. */
+static bool wg_filter_rx(const uint8_t *packet, size_t len, void *ctx)
+{
+    microlink_t *ml = ctx;
+    bool accepted = false;
+    if (xSemaphoreTake(ml->filter_mu, pdMS_TO_TICKS(20)) == pdTRUE) {
+        accepted = ml_packet_filter_accept(ml->packet_filters, packet, len, ml->vpn_ip) ||
+            (ml->packet_filters && ml_packet_filter_udp_reply(&ml->udp_flows, packet, len,
+                ml->vpn_ip, ml_get_time_ms(), false));
+        xSemaphoreGive(ml->filter_mu);
+    }
+    return accepted;
+}
+
+static void wg_filter_tx(const uint8_t *packet, size_t len, void *ctx)
+{
+    microlink_t *ml = ctx;
+    if (xSemaphoreTake(ml->filter_mu, pdMS_TO_TICKS(20)) == pdTRUE) {
+        ml_packet_filter_udp_reply(&ml->udp_flows, packet, len, ml->vpn_ip, ml_get_time_ms(), true);
+        xSemaphoreGive(ml->filter_mu);
+    }
+}
+
 static esp_err_t wg_init_interface(microlink_t *ml) {
     /* Convert our WG private key to base64 */
     char privkey_b64[64];
@@ -301,6 +327,7 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
     /* Register output callbacks for magicsock mode */
     wireguardif_set_derp_output(netif, wg_derp_output_cb, ml);
     wireguardif_set_udp_output(netif, wg_udp_output_cb, ml);
+    wireguardif_set_filter(netif, wg_filter_rx, wg_filter_tx, ml);
 
     /* On cellular AT socket bridge, force all WG output through DERP relay.
      * AT sockets are TCP-only, so direct UDP is impossible.

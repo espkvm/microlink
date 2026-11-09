@@ -84,6 +84,11 @@ typedef err_t (*wireguard_derp_output_fn)(const uint8_t *peer_public_key, const 
 // data: WireGuard packet to send
 // len: length of data
 // Returns: ERR_OK on success, error code on failure
+/* Packet filter on the tunnel: rx decides whether a decrypted inner packet
+ * may enter lwIP, tx sees each inner packet going out (to let its replies
+ * back in). Both get the IP packet itself. */
+typedef bool (*wireguard_rx_filter_fn)(const uint8_t *packet, size_t len, void *ctx);
+typedef void (*wireguard_tx_note_fn)(const uint8_t *packet, size_t len, void *ctx);
 typedef err_t (*wireguard_udp_output_fn)(uint32_t dest_ip, uint16_t dest_port, const uint8_t *data, size_t len, void *ctx);
 
 struct wireguard_keypair {
@@ -209,6 +214,10 @@ struct wireguard_device {
 
 	// UDP output callback for magicsock mode (external unified socket)
 	wireguard_udp_output_fn udp_output_fn;
+
+	wireguard_rx_filter_fn rx_filter_fn;
+	wireguard_tx_note_fn tx_note_fn;
+	void *filter_ctx;
 	void *udp_output_ctx;
 
 	// Force all peer output through DERP relay (cellular mode)

@@ -488,8 +488,9 @@ bool ml_stun_parse_response(const uint8_t *data, size_t len,
         return false;
     }
 
-    /* Check txid against IPv4 txid (IPv6 responses use separate parser) */
-    if (txid_v4_valid && memcmp(data + 8, txid_v4, 12) != 0) {
+    /* Only the answer to the pending IPv4 probe (IPv6 replies have their own
+     * parser). With no probe out, any reply would set the mapped address. */
+    if (!txid_v4_valid || memcmp(data + 8, txid_v4, 12) != 0) {
         /* Could be an IPv6 response arriving on IPv4 queue — don't warn */
         ESP_LOGD(TAG, "STUN IPv4 txid mismatch (may be IPv6 response)");
         return false;

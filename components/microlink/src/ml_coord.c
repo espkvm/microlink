@@ -1417,6 +1417,12 @@ static int64_t json_int64(const cJSON *v) {
 }
 
 static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
+    /* The packet filter rides on every map message, full or delta. An invalid
+     * one leaves no filter, so nothing gets in until a good one arrives. */
+    xSemaphoreTake(ml->filter_mu, portMAX_DELAY);
+    if (!ml_packet_filter_update(&ml->packet_filters, root))
+        ESP_LOGE(TAG, "Invalid packet filter from the control server: incoming tailnet traffic blocked");
+    xSemaphoreGive(ml->filter_mu);
     parse_user_profiles(ml, root);
     /* Try all field names used by Tailscale (copied from v1 lines 3176-3184):
      *   "Peers"        - Full peer list (initial Stream=false response)

@@ -16,6 +16,7 @@
 #pragma once
 
 #include "microlink.h"
+#include "ml_packet_filter.h"
 #include "ml_config_httpd.h"
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
@@ -419,6 +420,14 @@ struct microlink_s {
      * and sets state to QUEUED; coord sends it and reports through
      * ML_EVT_SETDNS_DONE. */
     SemaphoreHandle_t setdns_mu;
+
+    /* The tailnet policy for traffic into this node, from the map response.
+     * Tailscale enforces ACLs on the receiving node, so without it any peer
+     * could reach every port. NULL until the first map: nothing gets in.
+     * filter_mu guards packet_filters and udp_flows. */
+    SemaphoreHandle_t filter_mu;
+    cJSON *packet_filters;
+    ml_udp_flows_t udp_flows;
     volatile int setdns_state;          /* ML_SETDNS_* */
     char setdns_name[160];
     char setdns_value[128];

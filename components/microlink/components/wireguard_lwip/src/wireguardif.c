@@ -356,6 +356,13 @@ static err_t wireguardif_output(struct netif *netif, struct pbuf *q, const ip4_a
 
 
 	struct wireguard_peer *peer = peer_lookup_by_allowed_ip(device, &addr);
+	if (peer && device->tx_note_fn) {
+		/* The filter reads at most a 60-byte IP header and the ports after it,
+		 * and checks the lengths against the whole packet's. */
+		uint8_t head[64] = {0};
+		pbuf_copy_partial(q, head, sizeof(head), 0);
+		device->tx_note_fn(head, q->tot_len, device->filter_ctx);
+	}
 	if (peer) {
 		WG_DEBUG("[WG_OUTPUT] Found peer, peer_index=%d, valid=%d\n",
 		       (int)(peer - device->peers), peer->valid);
@@ -552,6 +559,11 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 							if (header_len <= pbuf->tot_len) {
 
 								// 5. If the plaintext packet has not been dropped, it is inserted into the receive queue of the wg0 interface.
+								if (dest_ok && device->rx_filter_fn &&
+								    !device->rx_filter_fn((const uint8_t *)pbuf->payload, pbuf->tot_len, device->filter_ctx)) {
+									WG_DEBUG("[WG_RX_IP] DROPPED by the packet filter\n");
+									dest_ok = false;
+								}
 								if (dest_ok) {
 									// Send packet to be processed by LWIP
 									WG_DEBUG("[WG_RX_IP] Passing %u bytes to IP layer\n", (unsigned)pbuf->tot_len);
@@ -1440,6 +1452,15 @@ void wireguardif_set_derp_output(struct netif *netif, wireguard_derp_output_fn f
 		device->derp_output_fn = fn;
 		device->derp_output_ctx = ctx;
 	}
+}
+
+void wireguardif_set_filter(struct netif *netif, wireguard_rx_filter_fn rx, wireguard_tx_note_fn tx, void *ctx) {
+	LWIP_ASSERT("netif != NULL", (netif != NULL));
+	LWIP_ASSERT("state != NULL", (netif->state != NULL));
+	struct wireguard_device *device = (struct wireguard_device *)netif->state;
+	device->filter_ctx = ctx;
+	device->tx_note_fn = tx;
+	device->rx_filter_fn = rx;
 }
 
 void wireguardif_set_udp_output(struct netif *netif, wireguard_udp_output_fn fn, void *ctx) {

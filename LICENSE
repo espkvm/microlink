@@ -33,6 +33,11 @@ The WireGuard protocol implementation is based on the WireGuard specification.
 The X25519 elliptic curve implementation is derived from public domain code
 by Daniel J. Bernstein. See x25519-license.txt for details.
 
+## JetKVM microlink fork
+The tailnet packet filter (ml_packet_filter.c, ml_packet_filter.h) and the STUN
+probe check come from github.com/jetkvm/microlink (commit 80d0f8a), MIT License,
+under the same copyright notice as above.
+
 ## Tailscale Protocol
 This implementation is based on reverse engineering of the Tailscale protocol.
 Tailscale is a trademark of Tailscale Inc. This project is not affiliated with

@@ -326,10 +326,11 @@ microlink_t *microlink_init(const microlink_config_t *config) {
     ml->stun_rx_queue = xQueueCreate(ML_STUN_RX_QUEUE_DEPTH, sizeof(ml_rx_packet_t));
     ml->coord_cmd_queue = xQueueCreate(ML_COORD_CMD_QUEUE_DEPTH, sizeof(ml_coord_cmd_t));
     ml->setdns_mu = xSemaphoreCreateMutex();
+    ml->filter_mu = xSemaphoreCreateMutex();
     ml->peer_update_queue = xQueueCreate(ML_PEER_UPDATE_QUEUE_DEPTH, sizeof(ml_peer_update_t *));
 
     if (!ml->derp_tx_queue || !ml->disco_rx_queue || !ml->wg_rx_queue ||
-        !ml->stun_rx_queue || !ml->coord_cmd_queue || !ml->peer_update_queue) {
+        !ml->stun_rx_queue || !ml->coord_cmd_queue || !ml->peer_update_queue || !ml->filter_mu) {
         ESP_LOGE(TAG, "Failed to create queues");
         microlink_destroy(ml);
         return NULL;
@@ -675,6 +676,9 @@ void microlink_destroy(microlink_t *ml) {
     if (ml->stun_rx_queue) vQueueDelete(ml->stun_rx_queue);
     if (ml->coord_cmd_queue) vQueueDelete(ml->coord_cmd_queue);
     if (ml->setdns_mu) vSemaphoreDelete(ml->setdns_mu);
+    if (ml->filter_mu) vSemaphoreDelete(ml->filter_mu);
+    cJSON_Delete(ml->packet_filters);
+    ml->packet_filters = NULL;
     if (ml->peer_update_queue) vQueueDelete(ml->peer_update_queue);
 
     /* Delete event group */
