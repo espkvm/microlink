@@ -137,6 +137,7 @@ struct wireguard_handshake {
 	uint8_t remote_ephemeral[WIREGUARD_PUBLIC_KEY_LEN];
 	uint8_t hash[WIREGUARD_HASH_LEN];
 	uint8_t chaining_key[WIREGUARD_HASH_LEN];
+	uint32_t created_millis;   /* wireguard_sys_now() when the handshake state was made; expires after REJECT_AFTER_TIME*3 */
 };
 
 struct wireguard_allowed_ip {
@@ -193,6 +194,8 @@ struct wireguard_peer {
 	uint32_t last_initiation_rx;
 	// The last time we sent an initiation message to this peer
 	uint32_t last_initiation_tx;
+	// last_tx without keepalives: an idle peer never answers those
+	uint32_t last_data_tx;
 
 	// last_tx and last_rx of data packets
 	uint32_t last_tx;
@@ -315,7 +318,14 @@ struct wireguard_peer *peer_lookup_by_peer_index(struct wireguard_device *device
 struct wireguard_peer *peer_lookup_by_receiver(struct wireguard_device *device, uint32_t receiver);
 struct wireguard_peer *peer_lookup_by_handshake(struct wireguard_device *device, uint32_t receiver);
 
-void wireguard_start_session(struct wireguard_peer *peer, bool initiator);
+/* false when the handshake state is gone (expired or never completed); nothing is changed then. */
+bool wireguard_start_session(struct wireguard_peer *peer, bool initiator);
+bool wireguard_keypair_expired(const struct wireguard_keypair *keypair);
+/* Expire the handshake and each of the three transport keypairs on their own (WireGuard 6.2: a key
+ * is unusable after REJECT_AFTER_TIME or REJECT_AFTER_MESSAGES; unfinished handshake state after 3x). */
+void wireguard_expire_keys(struct wireguard_peer *peer);
+void wireguard_destroy_handshake(struct wireguard_peer *peer);
+void wireguard_expire_handshake(struct wireguard_peer *peer);
 
 void keypair_update(struct wireguard_peer *peer, struct wireguard_keypair *received_keypair);
 void keypair_destroy(struct wireguard_keypair *keypair);
