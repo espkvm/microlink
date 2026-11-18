@@ -1008,6 +1008,34 @@ bool ml_lan_ipv4(uint32_t *ip_out) {
     return true;
 }
 
+typedef struct {
+    uint32_t *out;
+    int max;
+    int n;
+} lan_ips_ctx_t;
+
+static bool lan_ip_collect(esp_netif_t *netif, void *arg) {
+    lan_ips_ctx_t *c = arg;
+    esp_netif_ip_info_t info;
+    if (c->n < c->max && lan_netif_up(netif, NULL) &&
+        esp_netif_get_ip_info(netif, &info) == ESP_OK) {
+        uint32_t ip = ntohl(info.ip.addr);
+        for (int i = 0; i < c->n; i++) {
+            if (c->out[i] == ip) return false;
+        }
+        c->out[c->n++] = ip;
+    }
+    return false;   /* keep walking */
+}
+
+int ml_lan_ipv4s(uint32_t *out, int max) {
+    lan_ips_ctx_t c = { .out = out, .max = max, .n = 0 };
+    uint32_t first;
+    if (max > 0 && ml_lan_ipv4(&first)) out[c.n++] = first;   /* the default one first */
+    esp_netif_find_if(lan_ip_collect, &c);
+    return c.n;
+}
+
 uint32_t microlink_get_vpn_ip(const microlink_t *ml) {
     return ml ? ml->vpn_ip : 0;
 }

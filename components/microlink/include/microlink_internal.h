@@ -745,6 +745,9 @@ void ml_ota_confirm(void);         /* on CONNECTED: keep the new firmware */
  * directly: the default interface if it is one, else the first that is up.
  * Advertised as the "Local" endpoint. False if there is none. */
 bool ml_lan_ipv4(uint32_t *ip_out);
+/* Every LAN IPv4 that is up (Ethernet and Wi-Fi at once), the default one
+ * first, host order. A board on two networks is reachable on both. */
+int ml_lan_ipv4s(uint32_t *out, int max);
 
 /* ml_net_io.c */
 void ml_net_io_task(void *arg);

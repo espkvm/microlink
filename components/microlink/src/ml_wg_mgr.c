@@ -2173,7 +2173,7 @@ static void disco_send_call_me_maybe(microlink_t *ml, int peer_idx) {
     ml_peer_t *p = &ml->peers[peer_idx];
 
     /* Build plaintext: [type(1)][version(1)][endpoints(N * 18)] */
-    uint8_t plaintext[2 + 3 * 18];  /* Up to 3 endpoints */
+    uint8_t plaintext[2 + 4 * 18];  /* Up to 4 endpoints: 2 LAN, STUN, STUN IPv6 */
     int pt_len = 0;
     int ep_count = 0;
 
@@ -2182,8 +2182,10 @@ static void disco_send_call_me_maybe(microlink_t *ml, int peer_idx) {
 
     /* 1. Local LAN IP endpoint (critical for same-network peers) */
     {
-        uint32_t local_ip;
-        if (ml_lan_ipv4(&local_ip)) {
+        uint32_t lan_ips[2];
+        int lan_n = ml_lan_ipv4s(lan_ips, 2);
+        for (int li = 0; li < lan_n; li++) {
+            uint32_t local_ip = lan_ips[li];
             uint16_t local_port = ml->disco_local_port;
 
             if (local_port > 0) {

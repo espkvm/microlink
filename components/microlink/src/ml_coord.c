@@ -1893,8 +1893,10 @@ static int add_endpoints_to_json(microlink_t *ml, cJSON *root) {
 
     /* LAN endpoint (WiFi station or Ethernet) */
     {
-        uint32_t local_ip;
-        if (ml_lan_ipv4(&local_ip)) {
+        uint32_t lan_ips[2];
+        int lan_n = ml_lan_ipv4s(lan_ips, 2);
+        for (int li = 0; li < lan_n; li++) {
+            uint32_t local_ip = lan_ips[li];
             char ep_str[32];
             snprintf(ep_str, sizeof(ep_str), "%lu.%lu.%lu.%lu:%u",
                      (unsigned long)((local_ip >> 24) & 0xFF),
