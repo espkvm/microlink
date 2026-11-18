@@ -65,6 +65,14 @@ typedef struct {
      * false (default) keeps the existing Stream=false one-shot fetch. */
     bool streaming_map_fetch;
 
+    /* TLS around the coordination connection, chosen at run time: a device
+     * may join the hosted Tailscale service (plain port 80 works) or a
+     * Headscale behind an HTTPS reverse proxy (443 only) without a rebuild.
+     * ctrl_tls is a microlink_ctrl_tls_t. ctrl_port: 0 = 443 with TLS, 80
+     * without. */
+    uint8_t ctrl_tls;
+    uint16_t ctrl_port;
+
     /* Subnet router / exit node (needs CONFIG_ML_SUBNET_ROUTER). Prefixes,
      * separated by commas or spaces, that this device offers to the
      * tailnet, e.g. "192.168.1.0/24, fd12:3456::/64" (IPv6 needs
@@ -76,6 +84,13 @@ typedef struct {
      * must stay valid until microlink_init() returns. */
     const char *advertise_routes;
 } microlink_config_t;
+
+/* Whether the coordination connection runs inside TLS (microlink_config_t.ctrl_tls) */
+typedef enum {
+    ML_CTRL_TLS_DEFAULT = 0,    /* CONFIG_ML_CTRL_TLS decides */
+    ML_CTRL_TLS_ON,             /* TLS, port 443 unless ctrl_port says otherwise */
+    ML_CTRL_TLS_OFF,            /* plain TCP, port 80 unless ctrl_port says otherwise */
+} microlink_ctrl_tls_t;
 
 /* Peer info (read-only snapshot) */
 typedef struct {

@@ -461,6 +461,12 @@ microlink_t *microlink_init(const microlink_config_t *config) {
         strncpy(ml->ctrl_host, config->ctrl_host, sizeof(ml->ctrl_host) - 1);
         ESP_LOGI(TAG, "Control plane from config: %s", ml->ctrl_host);
     }
+#ifdef CONFIG_ML_CTRL_TLS
+    ml->ctrl_tls = config->ctrl_tls != ML_CTRL_TLS_OFF;
+#else
+    ml->ctrl_tls = config->ctrl_tls == ML_CTRL_TLS_ON;
+#endif
+    ml->ctrl_port = config->ctrl_port ? config->ctrl_port : (ml->ctrl_tls ? 443 : 80);
     if (config->ctrl_noise_pubkey) {
         memcpy(ml->ctrl_noise_pubkey, config->ctrl_noise_pubkey, 32);
         ml->ctrl_noise_pubkey_set = true;

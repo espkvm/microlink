@@ -1,6 +1,6 @@
 /**
  * @file ml_coord_tls.c
- * @brief TLS transport for the coordination connection (CONFIG_ML_CTRL_TLS)
+ * @brief TLS transport for the coordination connection (microlink_config_t.ctrl_tls)
  *
  * Wraps the ts2021 Noise handshake in TLS on port 443 for control planes
  * that only expose an HTTPS listener (e.g. Headscale behind a load
@@ -14,7 +14,6 @@
 
 #include "sdkconfig.h"
 
-#ifdef CONFIG_ML_CTRL_TLS
 
 #include "microlink_internal.h"
 #include "esp_log.h"
@@ -187,4 +186,3 @@ void ml_coord_tls_free(microlink_t *ml) {
     t->active = false;
 }
 
-#endif /* CONFIG_ML_CTRL_TLS */

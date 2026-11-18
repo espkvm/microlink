@@ -136,18 +136,15 @@ static void coord_set_rcv_timeout(microlink_t *ml, uint32_t ms) {
 }
 
 /* Single read from the coord transport (recv() semantics), waiting up to
- * ml->coord_st.rcv_timeout_ms. With CONFIG_ML_CTRL_TLS the Noise byte stream
+ * ml->coord_st.rcv_timeout_ms. With ml->ctrl_tls the Noise byte stream
  * runs inside TLS records; timeouts still surface as -1/EAGAIN via the TLS
  * BIO. Returns -1/ECANCELED once shutdown has been requested. */
 static int coord_raw_recv(microlink_t *ml, uint8_t *buf, size_t len) {
     uint64_t start_ms = ml_get_time_ms();
     for (;;) {
         uint64_t try_ms = ml_get_time_ms();
-#ifdef CONFIG_ML_CTRL_TLS
-        int n = ml_coord_tls_recv(ml, buf, len);
-#else
-        int n = ml_recv(ml->coord_sock, buf, len, 0);
-#endif
+        int n = ml->ctrl_tls ? ml_coord_tls_recv(ml, buf, len)
+                             : ml_recv(ml->coord_sock, buf, len, 0);
         if (n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) return n;
         if (ml_shutdown_requested(ml)) {
             errno = ECANCELED;
@@ -166,9 +163,7 @@ static int coord_raw_recv(microlink_t *ml, uint8_t *buf, size_t len) {
 
 /* Close the coord connection (TLS session first, then the socket) */
 static void coord_close_conn(microlink_t *ml) {
-#ifdef CONFIG_ML_CTRL_TLS
-    ml_coord_tls_free(ml);
-#endif
+    if (ml->ctrl_tls) ml_coord_tls_free(ml);
     if (ml->coord_sock >= 0) {
         ml_close_sock(ml->coord_sock);
         ml->coord_sock = -1;
@@ -180,13 +175,13 @@ static int coord_send(microlink_t *ml, const uint8_t *data, size_t len) {
     struct timeval snd_tv = { .tv_sec = 5, .tv_usec = 0 };
     ml_setsockopt(ml->coord_sock, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
 
-#ifdef CONFIG_ML_CTRL_TLS
-    if (ml_coord_tls_send(ml, data, len) < 0) {
-        ESP_LOGE(TAG, "coord_send (TLS) failed: len=%d errno=%d", (int)len, errno);
-        return -1;
+    if (ml->ctrl_tls) {
+        if (ml_coord_tls_send(ml, data, len) < 0) {
+            ESP_LOGE(TAG, "coord_send (TLS) failed: len=%d errno=%d", (int)len, errno);
+            return -1;
+        }
+        return 0;
     }
-    return 0;
-#else
     size_t sent = 0;
     while (sent < len) {
         int n = ml_send(ml->coord_sock, data + sent, len - sent, 0);
@@ -198,7 +193,6 @@ static int coord_send(microlink_t *ml, const uint8_t *data, size_t len) {
         sent += n;
     }
     return 0;
-#endif
 }
 
 /* Limits for finishing a read that has started. They are wall-clock times:
@@ -410,11 +404,8 @@ static int do_tcp_connect(microlink_t *ml) {
     struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM };
     struct addrinfo *res = NULL;
 
-#ifdef CONFIG_ML_CTRL_TLS
-    const char *ctrl_port = "443";
-#else
-    const char *ctrl_port = "80";
-#endif
+    char ctrl_port[8];
+    snprintf(ctrl_port, sizeof(ctrl_port), "%u", (unsigned)ml->ctrl_port);
 
     if (ml_getaddrinfo(CTRL_HOST(ml), ctrl_port, &hints, &res) != 0 || !res) {
         ESP_LOGE(TAG, "DNS resolve failed for %s", CTRL_HOST(ml));
@@ -463,15 +454,15 @@ static int do_tcp_connect(microlink_t *ml) {
     ml->coord_sock = sock;
     coord_set_rcv_timeout(ml, 10000);  /* same 10 s, now in slices */
 
-#ifdef CONFIG_ML_CTRL_TLS
-    if (ml_coord_tls_handshake(ml, CTRL_HOST(ml)) < 0) {
-        ml_close_sock(ml->coord_sock);
-        ml->coord_sock = -1;
-        return -1;
+    if (ml->ctrl_tls) {
+        if (ml_coord_tls_handshake(ml, CTRL_HOST(ml)) < 0) {
+            ml_close_sock(ml->coord_sock);
+            ml->coord_sock = -1;
+            return -1;
+        }
+        int64_t t_tls = esp_timer_get_time();
+        ESP_LOGI(TAG, "[TIMING] Control TLS handshake: %ld ms", (long)((t_tls - t_tcp) / 1000));
     }
-    int64_t t_tls = esp_timer_get_time();
-    ESP_LOGI(TAG, "[TIMING] Control TLS handshake: %ld ms", (long)((t_tls - t_tcp) / 1000));
-#endif
 
     return 0;
 }
@@ -2950,11 +2941,9 @@ static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
 }
 
 static int poll_map_update(microlink_t *ml, ml_noise_state_t *noise) {
-#ifdef CONFIG_ML_CTRL_TLS
     /* Decrypted bytes may already sit in the TLS layer with nothing left
      * on the socket — select() alone would miss them. */
-    if (ml_coord_tls_pending(ml) == 0)
-#endif
+    if (!ml->ctrl_tls || ml_coord_tls_pending(ml) == 0)
     {
         fd_set readfds;
         FD_ZERO(&readfds);

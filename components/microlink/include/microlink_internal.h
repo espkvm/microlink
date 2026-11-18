@@ -445,7 +445,7 @@ typedef struct {
 } ml_derp_conn_t;
 
 /* ============================================================================
- * Control Plane TLS State (CONFIG_ML_CTRL_TLS)
+ * Control Plane TLS State (when ml->ctrl_tls)
  * ========================================================================== */
 
 typedef struct {
@@ -551,9 +551,7 @@ struct microlink_s {
 
     /* Coordination socket (owned exclusively by coord task) */
     int coord_sock;
-#ifdef CONFIG_ML_CTRL_TLS
     ml_coord_tls_t coord_tls;
-#endif
     ml_coord_state_t coord_st;          /* Owned exclusively by coord task */
     uint32_t h2_next_stream_id;         /* Next H2 stream ID for endpoint updates (odd, starts at 7) */
 
@@ -635,6 +633,8 @@ struct microlink_s {
      * Set from config struct or NVS at boot for Headscale/Ionscale/custom
      * coordinators. */
     char ctrl_host[64];
+    bool ctrl_tls;          /* coordination connection inside TLS */
+    uint16_t ctrl_port;     /* its TCP port */
 
     /* Control plane Noise public key override (from config struct;
      * ctrl_noise_pubkey_set false = use CONFIG_ML_CTRL_NOISE_PUBKEY_HEX
@@ -739,14 +739,12 @@ bool ml_stun_parse_response(const uint8_t *data, size_t len,
 bool ml_stun_parse_response_ipv6(const uint8_t *data, size_t len,
                                   uint8_t *out_ip6, uint16_t *out_port);
 
-/* ml_coord_tls.c (CONFIG_ML_CTRL_TLS) */
-#ifdef CONFIG_ML_CTRL_TLS
+/* ml_coord_tls.c (used when ml->ctrl_tls) */
 int ml_coord_tls_handshake(microlink_t *ml, const char *hostname);
 int ml_coord_tls_send(microlink_t *ml, const uint8_t *data, size_t len);
 int ml_coord_tls_recv(microlink_t *ml, uint8_t *buf, size_t len);
 size_t ml_coord_tls_pending(microlink_t *ml);
 void ml_coord_tls_free(microlink_t *ml);
-#endif
 
 /* ml_noise.c */
 void ml_noise_init(ml_noise_state_t *state,
