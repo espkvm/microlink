@@ -1359,12 +1359,14 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
     cJSON *reg_err = cJSON_GetObjectItem(resp_json, "Error");
     if (reg_err && cJSON_IsString(reg_err) && reg_err->valuestring[0]) {
         ESP_LOGE(TAG, "Registration rejected by control plane: %s", reg_err->valuestring);
+        snprintf(ml->reg_error, sizeof(ml->reg_error), "%s", reg_err->valuestring);
         cJSON_Delete(resp_json);
         set_auth_url(ml, NULL);   /* e.g. an expired login: start over */
         return ML_REG_AUTH_FAILED;
     }
     cJSON *authorized = cJSON_GetObjectItem(resp_json, "MachineAuthorized");
     bool is_authorized = authorized && cJSON_IsTrue(authorized);
+    if (is_authorized) ml->reg_error[0] = '\0';
 
     /* Interactive login (no auth key): the server sends the URL the user
      * must open, as Tailscale's direct.go handles resp.AuthURL. */

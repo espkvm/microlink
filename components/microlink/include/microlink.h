@@ -274,6 +274,13 @@ uint32_t microlink_get_vpn_ip(const microlink_t *ml);
 esp_err_t microlink_get_auth_url(microlink_t *ml, char *buf, size_t buf_len);
 
 /**
+ * @brief Why the control plane refused the last registration
+ * @return Its Error text (e.g. "invalid key: unable to validate API key"),
+ *         or "" when the last registration was accepted or none failed
+ */
+const char *microlink_get_register_error(const microlink_t *ml);
+
+/**
  * @brief Your own lwIP IPv6 input hook, when MicroLink forwards IPv6
  *
  * With CONFIG_ML_ROUTER_IPV6, MicroLink implements lwIP's

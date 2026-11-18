@@ -1016,6 +1016,10 @@ int microlink_get_peer_count(const microlink_t *ml) {
     return ml ? ml->peer_count : 0;
 }
 
+const char *microlink_get_register_error(const microlink_t *ml) {
+    return ml ? ml->reg_error : "";
+}
+
 const char *microlink_get_self_name(const microlink_t *ml) {
     return ml ? ml->self_name : "";
 }

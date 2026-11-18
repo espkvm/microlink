@@ -653,6 +653,7 @@ struct microlink_s {
     /* Our MagicDNS name and the tailnet's certificate domain, written by
      * the coord task. */
     char self_name[128];
+    char reg_error[96];     /* the control plane's last registration Error, "" = none */
     char cert_domain[128];
 
     /* microlink_set_dns(): one request at a time, handed to the coord task,
