@@ -1105,7 +1105,7 @@ esp_err_t microlink_get_peer_info(const microlink_t *ml, int index, microlink_pe
     }
     const ml_peer_t *p = &ml->peers[index];
     info->vpn_ip = p->vpn_ip;
-    strncpy(info->hostname, p->hostname, sizeof(info->hostname) - 1);
+    strlcpy(info->hostname, p->hostname, sizeof(info->hostname));   /* the caller's struct may be uninitialised */
     memcpy(info->public_key, p->public_key, 32);
     info->active = p->active;
     info->online = p->online;
