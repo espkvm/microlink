@@ -1938,7 +1938,12 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
 
     if (nacl_box_open_afternm(plaintext, ciphertext, ciphertext_len, nonce,
                               disco_shared) != 0) {
-        ESP_LOGW(TAG, "DISCO decrypt failed");
+        ESP_LOGW(TAG, "DISCO decrypt failed from %d.%d.%d.%d:%d (via %s, disco_key=%02x%02x%02x%02x)",
+                 (int)((pkt->src_ip >> 24) & 0xFF), (int)((pkt->src_ip >> 16) & 0xFF),
+                 (int)((pkt->src_ip >> 8) & 0xFF), (int)(pkt->src_ip & 0xFF),
+                 (int)pkt->src_port, pkt->via_derp ? "DERP" : "direct",
+                 sender_disco_key[0], sender_disco_key[1],
+                 sender_disco_key[2], sender_disco_key[3]);
         free(plaintext);
         return;
     }
