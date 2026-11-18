@@ -176,6 +176,7 @@ void wireguardif_periodic(struct netif *netif);
 
 // Disable WireGuard's internal UDP socket binding
 // Call before wireguardif_init to prevent WireGuard from binding its own socket.
+// It applies to that one wireguardif_init call.
 // The caller is then responsible for receiving packets and calling wireguardif_network_rx.
 void wireguardif_disable_socket_bind(void);
 

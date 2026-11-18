@@ -112,7 +112,9 @@ static const char *WG_TAG = "wg";
 // Forward declaration for timer cancellation in wireguardif_shutdown
 static void wireguardif_tmr(void *arg);
 
-// Flag to disable internal UDP socket binding (for magicsock mode)
+// Flag to disable internal UDP socket binding (for magicsock mode). It applies
+// to the next wireguardif_init only: a plain WireGuard interface brought up later
+// in the same boot (after the Tailscale one stopped) still gets its own socket.
 static bool g_disable_socket_bind = false;
 
 void wireguardif_disable_socket_bind(void) {
@@ -1493,6 +1495,9 @@ err_t wireguardif_init(struct netif *netif) {
 	struct udp_pcb *udp;
 	uint8_t private_key[WIREGUARD_PRIVATE_KEY_LEN];
 	size_t private_key_len = sizeof(private_key);
+	// Taken and cleared at once, so it reaches this call only, even one that fails.
+	const bool no_socket = g_disable_socket_bind;
+	g_disable_socket_bind = false;
 
 	LWIP_ASSERT("netif != NULL", (netif != NULL));
 	LWIP_ASSERT("state != NULL", (netif->state != NULL));
@@ -1512,7 +1517,7 @@ err_t wireguardif_init(struct netif *netif) {
 				&& (private_key_len == WIREGUARD_PRIVATE_KEY_LEN)) {
 
 			// In magicsock mode, skip creating UDP socket - packets come via wireguardif_network_rx
-			if (g_disable_socket_bind) {
+			if (no_socket) {
 				WG_DEBUG("[WG] Socket binding disabled - using magicsock mode");
 				device = (struct wireguard_device *)mem_calloc(1, sizeof(struct wireguard_device));
 				if (device) {
