@@ -986,8 +986,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     p->ip6_installed = false;
     memcpy(p->public_key, update->public_key, 32);
     memcpy(p->disco_key, update->disco_key, 32);
-    strncpy(p->hostname, update->hostname, sizeof(p->hostname) - 1);
-    p->hostname[sizeof(p->hostname) - 1] = '\0';
+    strlcpy(p->hostname, update->hostname, sizeof(p->hostname));
     p->derp_region = update->derp_region;
     p->active = true;
     p->online = update->online;

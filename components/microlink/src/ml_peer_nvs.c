@@ -209,7 +209,7 @@ esp_err_t ml_peer_nvs_save(const ml_peer_t *peer) {
     entry.endpoint_count = stored;
 
     /* Truncated hostname for display */
-    strncpy(entry.hostname_short, peer->hostname, sizeof(entry.hostname_short) - 1);
+    strlcpy(entry.hostname_short, peer->hostname, sizeof(entry.hostname_short));
 
     /* Find existing entry by VPN IP (update) or public key (re-keyed) */
     int slot = -1;
