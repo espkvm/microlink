@@ -1059,7 +1059,8 @@ static void add_hostinfo(microlink_t *ml, cJSON *root) {
 
     cJSON *netinfo = cJSON_CreateObject();
     if (netinfo) {
-        cJSON_AddNumberToObject(netinfo, "PreferredDERP", ML_DERP_REGION);
+        cJSON_AddNumberToObject(netinfo, "PreferredDERP",
+                                ml->derp_home_region ? ml->derp_home_region : ML_DERP_REGION);
         if (ml->stun_nat_checked) {
             cJSON_AddBoolToObject(netinfo, "MappingVariesByDestIP", ml->nat_mapping_varies);
         }
@@ -1418,7 +1419,9 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
         /* Parse self-node DERP region — try modern HomeDERP (int) first,
          * then fall back to legacy DERP string (format: "127.3.3.40:REGION") */
         cJSON *home_derp = cJSON_GetObjectItem(node, "HomeDERP");
-        if (home_derp && cJSON_IsNumber(home_derp) && home_derp->valueint > 0) {
+        if (ml->derp_home_probed) {
+            /* our own pick stands (see parse_self_node_from_map) */
+        } else if (home_derp && cJSON_IsNumber(home_derp) && home_derp->valueint > 0) {
             ml->derp_home_region = (uint16_t)home_derp->valueint;
             ESP_LOGI(TAG, "Home DERP region: %d (from server, HomeDERP)", ml->derp_home_region);
         } else {
@@ -1952,7 +1955,10 @@ static void parse_self_node_from_map(microlink_t *ml, cJSON *map_json) {
     /* Parse self-node DERP region — try modern HomeDERP (int) first,
      * then fall back to legacy DERP string (format: "127.3.3.40:REGION") */
     cJSON *home_derp = cJSON_GetObjectItem(node, "HomeDERP");
-    if (home_derp && cJSON_IsNumber(home_derp) && home_derp->valueint > 0) {
+    if (ml->derp_home_probed) {
+        /* Our own pick (configured or nearest) stands; the server's
+         * HomeDERP only echoes the PreferredDERP we report. */
+    } else if (home_derp && cJSON_IsNumber(home_derp) && home_derp->valueint > 0) {
         ml->derp_home_region = (uint16_t)home_derp->valueint;
         ESP_LOGI(TAG, "Home DERP region: %d (from server, HomeDERP)", ml->derp_home_region);
     } else {
@@ -2100,6 +2106,41 @@ static void parse_derp_map_from_map(microlink_t *ml, cJSON *map_json) {
         ml->derp_region_count++;
     }
     ESP_LOGI(TAG, "DERPMap: parsed %d regions", ml->derp_region_count);
+
+    /*
+     * Choose the home DERP region now that the map is known, before the relay
+     * is connected. The server echoes the PreferredDERP we report, and the
+     * built-in default (CONFIG_ML_DERP_REGION) is a bad relay for anyone far
+     * from it. A configured region wins; otherwise probe latency and take the
+     * nearest, falling back to Frankfurt and then to what we already had.
+     */
+    if (ml->derp_region_count > 0 && !ml->derp_home_probed) {
+        ml->derp_home_probed = true;
+        if (ml->config.derp_home_region) {
+            ml->derp_home_region = ml->config.derp_home_region;
+            ESP_LOGI(TAG, "Home DERP region: %u (configured)", ml->derp_home_region);
+        } else {
+            uint16_t nearest = ml_stun_pick_nearest_region(ml);
+            if (nearest) {
+                ml->derp_home_region = nearest;
+            } else {
+                uint16_t fra = 0;
+                for (int i = 0; i < ml->derp_region_count; i++) {
+                    if (strcmp(ml->derp_regions[i].code, "fra") == 0) {
+                        fra = ml->derp_regions[i].region_id;
+                        break;
+                    }
+                }
+                if (fra) {
+                    ml->derp_home_region = fra;
+                    ESP_LOGW(TAG, "DERP probe failed; falling back to Frankfurt (region %u)", fra);
+                } else {
+                    ESP_LOGW(TAG, "DERP probe failed, no Frankfurt in map; keeping region %u",
+                             ml->derp_home_region ? ml->derp_home_region : ML_DERP_REGION);
+                }
+            }
+        }
+    }
 }
 
 /* MapResponse bodies are a 4-byte length (little-endian; big-endian also

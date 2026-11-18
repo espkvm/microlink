@@ -1092,6 +1092,28 @@ esp_err_t microlink_get_peer_info(const microlink_t *ml, int index, microlink_pe
     return ESP_OK;
 }
 
+void microlink_get_derp_code(const microlink_t *ml, uint16_t region, char code[8]) {
+    code[0] = '\0';
+    if (!ml || !region) return;
+    for (int i = 0; i < ml->derp_region_count; i++) {
+        if (ml->derp_regions[i].region_id == region) {
+            snprintf(code, 8, "%s", ml->derp_regions[i].code);
+            return;
+        }
+    }
+}
+
+uint16_t microlink_get_derp_home(const microlink_t *ml, char code[8]) {
+    if (code) code[0] = '\0';
+    if (!ml) return 0;
+    if (code) microlink_get_derp_code(ml, ml->derp_home_region, code);
+    return ml->derp_home_region;
+}
+
+bool microlink_derp_connected(const microlink_t *ml) {
+    return ml && ml->derp.connected;
+}
+
 /* ============================================================================
  * Send API
  * ========================================================================== */

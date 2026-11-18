@@ -85,6 +85,11 @@ typedef struct {
      * the coordination task with the method and the path with its query;
      * writes the body (JSON or text) into body and returns the HTTP status.
      * NULL: every request gets 404. Keep it quick, it holds up the long-poll. */
+    /* Home DERP region id. 0 = pick the nearest region by STUN latency once
+     * the DERPMap is known (Frankfurt, then CONFIG_ML_DERP_REGION when no
+     * region answers). Non-zero forces that region. */
+    uint16_t derp_home_region;
+
     int (*c2n_handler)(const char *method, const char *path, char *body, size_t cap, void *arg);
     void *c2n_arg;
 
@@ -334,6 +339,18 @@ bool microlink_key_expired(const microlink_t *ml);
  * @return ESP_OK if valid index
  */
 esp_err_t microlink_get_peer_info(const microlink_t *ml, int index, microlink_peer_info_t *info);
+
+/**
+ * @brief Our home DERP region: its id (0 = none yet), and its short code
+ *        ("fra") in @p code when @p code is not NULL.
+ */
+uint16_t microlink_get_derp_home(const microlink_t *ml, char code[8]);
+
+/** @brief The short code of DERP region @p region ("" when unknown). */
+void microlink_get_derp_code(const microlink_t *ml, uint16_t region, char code[8]);
+
+/** @brief Whether the relay connection is up. */
+bool microlink_derp_connected(const microlink_t *ml);
 
 /**
  * @brief Deprecated: always returns ESP_ERR_NOT_SUPPORTED.
