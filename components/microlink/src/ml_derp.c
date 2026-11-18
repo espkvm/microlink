@@ -610,6 +610,8 @@ void ml_derp_tx_task(void *arg) {
     uint32_t loop_count = 0;
     uint64_t last_heartbeat_ms = 0;
     uint64_t connected_since_ms = 0;
+    uint32_t retry_ms = 5000;        /* next pause before a reconnect attempt */
+    uint64_t retry_at_ms = 0;        /* when to try, 0 = not scheduled */
     bool verbose_phase = false;  /* verbose logging for first 15s after connect */
 
     while (!(xEventGroupGetBits(ml->events) & ML_EVT_SHUTDOWN_REQUEST)) {
@@ -696,6 +698,39 @@ void ml_derp_tx_task(void *arg) {
         /* Disable verbose logging after 15s */
         if (verbose_phase && ml_get_time_ms() - connected_since_ms > 15000) {
             verbose_phase = false;
+        }
+
+        /* Once the relay is wanted, keep trying: after the three attempts
+         * above nothing else brought it back until the control connection
+         * happened to reconnect, and a device behind a strict NAT has no
+         * other path. 5 s doubling to 60 s. */
+        if ((xEventGroupGetBits(ml->events) & ML_EVT_COORD_REGISTERED) && !ml->derp.connected) {
+            const uint64_t now_ms = ml_get_time_ms();
+            if (retry_at_ms == 0) {
+                retry_at_ms = now_ms + retry_ms;
+            } else if (now_ms >= retry_at_ms && !ml_shutdown_requested(ml)) {
+                ESP_LOGW(TAG, "DERP down, trying again (every %lu s)", (unsigned long)(retry_ms / 1000));
+                if (ml_derp_connect(ml) == ESP_OK) {
+                    connected_since_ms = ml_get_time_ms();
+                    retry_ms = 5000;
+                    retry_at_ms = 0;
+                } else {
+                    retry_ms = retry_ms * 2 > 60000 ? 60000 : retry_ms * 2;
+                    retry_at_ms = ml_get_time_ms() + retry_ms;
+                }
+            }
+        } else if (ml->derp.connected) {
+            retry_ms = 5000;
+            retry_at_ms = 0;
+            /* The relay sends a keepalive every minute. 90 s of nothing on a
+             * "connected" relay means it is dead (a NAT rebind, a silently
+             * dropped TCP connection): reconnect. */
+            if (ml->derp.last_recv_ms && ml_get_time_ms() - ml->derp.last_recv_ms > 90000) {
+                ESP_LOGW(TAG, "DERP silent for 90 s, reconnecting");
+                ml->derp.connected = false;
+                xEventGroupSetBits(ml->events, ML_EVT_DERP_RECONNECT);
+                continue;
+            }
         }
 
         if (!ml->derp.connected) {
