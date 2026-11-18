@@ -1393,7 +1393,9 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
         parse_start += json_offset;
         parse_len -= json_offset;
     } else if (json_offset < 0) {
-        ESP_LOGW(TAG, "No '{' found in RegisterResponse data");
+        ESP_LOGW(TAG, "No '{' found in RegisterResponse data (%d bytes, first %02x %02x %02x %02x)",
+                 (int)json_data_len, json_data[0], json_data_len > 1 ? json_data[1] : 0,
+                 json_data_len > 2 ? json_data[2] : 0, json_data_len > 3 ? json_data[3] : 0);
         free(resp_buf);
         return 0;
     }
@@ -3563,6 +3565,11 @@ void ml_coord_task(void *arg) {
                     coord_close_conn(ml);
                     state = COORD_RECONNECTING;
                     break;
+                }
+                /* Registered: a login URL from before is used up, also when
+                 * the Followup answer could not be parsed. */
+                if (ml->auth_url[0]) {
+                    set_auth_url(ml, NULL);
                 }
             }
             state = COORD_FETCH_PEERS;
