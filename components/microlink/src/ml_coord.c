@@ -1853,13 +1853,48 @@ static int add_endpoints_to_json(microlink_t *ml, cJSON *root) {
     return count;
 }
 
+/* Our MagicDNS FQDN (Node.Name), used e.g. to name a TLS certificate. It
+ * comes in a full map and again in an update when the machine is renamed. */
+static void set_self_name(microlink_t *ml, const cJSON *node) {
+    const cJSON *nm = cJSON_GetObjectItem(node, "Name");
+    if (!nm || !cJSON_IsString(nm) || !nm->valuestring[0]) return;
+    char name[sizeof(ml->self_name)];
+    strlcpy(name, nm->valuestring, sizeof(name));
+    size_t nl = strlen(name);
+    if (nl > 0 && name[nl - 1] == '.') name[nl - 1] = '\0';
+    if (strcmp(name, ml->self_name) != 0) {
+        strlcpy(ml->self_name, name, sizeof(ml->self_name));
+        ESP_LOGI(TAG, "Our tailnet name: %s", ml->self_name);
+    }
+}
+
+/* DNSConfig.CertDomains lists the names the control plane will publish an
+ * _acme-challenge record for. Empty or absent: HTTPS certificates are off. */
+static void parse_cert_domains(microlink_t *ml, cJSON *root) {
+    cJSON *dns = cJSON_GetObjectItem(root, "DNSConfig");
+    if (!dns) return;
+    cJSON *cd = cJSON_GetObjectItem(dns, "CertDomains");
+    const char *first = NULL;
+    if (cJSON_IsArray(cd) && cJSON_GetArraySize(cd) > 0) {
+        cJSON *it = cJSON_GetArrayItem(cd, 0);
+        if (cJSON_IsString(it)) first = it->valuestring;
+    }
+    if (!first) first = "";
+    if (strcmp(first, ml->cert_domain) != 0) {
+        strlcpy(ml->cert_domain, first, sizeof(ml->cert_domain));
+        ESP_LOGI(TAG, "Certificate domain: %s", first[0] ? first : "(none, HTTPS off in the tailnet)");
+    }
+}
+
 /* Ingest the self-node info (VPN IP / HomeDERP / KeyExpiry / Expired) from
  * a MapResponse. Shared parser called from both paths — the Stream=false
  * one-shot fetch and the streaming_map_fetch initial netmap (extracted from
  * do_fetch_peers). */
 static void parse_self_node_from_map(microlink_t *ml, cJSON *map_json) {
+    parse_cert_domains(ml, map_json);
     cJSON *node = cJSON_GetObjectItem(map_json, "Node");
     if (!node) return;
+    set_self_name(ml, node);
 
     /* Extract VPN IP if not already set */
     if (ml->vpn_ip == 0) {
@@ -2527,6 +2562,8 @@ static void lp_handle_message(microlink_t *ml, const char *json, size_t len) {
         }
     }
 
+    if (node) set_self_name(ml, node); /* the machine was renamed */
+    parse_cert_domains(ml, update_json);
     parse_peers_from_map_response(ml, update_json);
     ml_filter_update_from_map(update_json);
     ml_wg_mgr_wake(ml);
@@ -2570,6 +2607,110 @@ static int lp_read_frame(microlink_t *ml, ml_noise_state_t *noise) {
     return 1;
 }
 
+/* ============================================================================
+ * set-dns: a DNS record published through the control plane
+ * ========================================================================== */
+
+static void setdns_finish(microlink_t *ml, bool ok, const char *why) {
+    if (ml->setdns_state != ML_SETDNS_SENT) return;
+    ml->setdns_ok = ok;
+    if (!ok && why && !ml->setdns_err[0]) {
+        snprintf(ml->setdns_err, sizeof(ml->setdns_err), "%s", why);
+    }
+    ml->setdns_state = ML_SETDNS_IDLE;
+    xEventGroupSetBits(ml->events, ML_EVT_SETDNS_DONE);
+}
+
+/* POST /machine/set-dns on a stream of its own, on the open connection. */
+static void setdns_send(microlink_t *ml, ml_noise_state_t *noise) {
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return;
+    char key_hex[65], key_str[80];
+    cJSON_AddNumberToObject(root, "Version", ML_CTRL_PROTOCOL_VER);
+    bytes_to_hex(ml->wg_public_key, 32, key_hex);
+    snprintf(key_str, sizeof(key_str), "nodekey:%s", key_hex);
+    cJSON_AddStringToObject(root, "NodeKey", key_str);
+    cJSON_AddStringToObject(root, "Name", ml->setdns_name);
+    cJSON_AddStringToObject(root, "Type", "TXT");
+    cJSON_AddStringToObject(root, "Value", ml->setdns_value);
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json_str) return;
+
+    if (ml->h2_next_stream_id < 7) ml->h2_next_stream_id = 7;
+    uint32_t sid = ml->h2_next_stream_id;
+    ml->h2_next_stream_id += 2;
+
+    size_t json_len = strlen(json_str);
+    size_t cap = json_len + 512;
+    uint8_t *h2_buf = ml_psram_malloc(cap);
+    int pos = -1;
+    if (h2_buf) {
+        int hl = ml_h2_build_headers_frame(h2_buf, cap, "POST", "/machine/set-dns",
+                                           CTRL_HOST(ml), "application/json", sid, false);
+        if (hl > 0) {
+            int dl = ml_h2_build_data_frame(h2_buf + hl, cap - hl, (uint8_t *)json_str,
+                                            json_len, sid, true);
+            if (dl > 0) pos = hl + dl;
+        }
+    }
+    free(json_str);
+
+    ml->setdns_sid = sid;
+    ml->setdns_sent_ms = ml_get_time_ms();
+    ml->setdns_state = ML_SETDNS_SENT;
+    if (pos < 0 || noise_send(ml, noise, h2_buf, pos) < 0) {
+        setdns_finish(ml, false, "could not send the request");
+    } else {
+        ESP_LOGI(TAG, "set-dns %s sent on H2 stream %lu", ml->setdns_name, (unsigned long)sid);
+    }
+    free(h2_buf);
+}
+
+/* The :status of a response HEADERS block. Only the static-table forms are
+ * told apart (200 and 204 are what success looks like); anything else is
+ * "not success", and the body says why. */
+static bool h2_status_ok(const uint8_t *p, uint32_t len) {
+    uint32_t i = 0;
+    while (i < len && (p[i] & 0xE0) == 0x20) {  /* dynamic table size update */
+        if ((p[i] & 0x1F) == 0x1F) { i++; while (i < len && (p[i] & 0x80)) i++; }
+        i++;
+    }
+    return i < len && (p[i] == 0x88 || p[i] == 0x89);
+}
+
+/* A frame on the set-dns stream, seen while reading the long-poll. */
+static void setdns_frame(microlink_t *ml, uint8_t type, uint8_t flags,
+                         const uint8_t *payload, uint32_t len) {
+    if (ml->setdns_state != ML_SETDNS_SENT) return;
+    if (type == 0x01) {  /* HEADERS */
+        const uint8_t *p = payload;
+        uint32_t n = len;
+        if ((flags & 0x08) && n > 0) {  /* PADDED */
+            uint8_t pad = p[0]; p++; n--;
+            n = (pad < n) ? n - pad : 0;
+        }
+        if ((flags & 0x20) && n >= 5) { p += 5; n -= 5; }  /* PRIORITY */
+        ml->setdns_ok = h2_status_ok(p, n);
+        if (!ml->setdns_ok) snprintf(ml->setdns_err, sizeof(ml->setdns_err), "refused by the control server");
+        if (flags & 0x01) setdns_finish(ml, ml->setdns_ok, NULL);
+    } else if (type == 0x00) {  /* DATA */
+        if (!ml->setdns_ok && len > 0) {
+            /* The reason, as plain text or JSON. */
+            size_t m = len < sizeof(ml->setdns_err) - 1 ? len : sizeof(ml->setdns_err) - 1;
+            memcpy(ml->setdns_err, payload, m);
+            ml->setdns_err[m] = '\0';
+            for (size_t k = 0; k < m; k++) {
+                if (ml->setdns_err[k] == '\n' || ml->setdns_err[k] == '\r') ml->setdns_err[k] = ' ';
+            }
+            ESP_LOGW(TAG, "set-dns refused: %s", ml->setdns_err);
+        }
+        if (flags & 0x01) setdns_finish(ml, ml->setdns_ok, NULL);
+    } else if (type == 0x03) {  /* RST_STREAM */
+        setdns_finish(ml, false, "the control server reset the request");
+    }
+}
+
 typedef struct {
     uint32_t data_bytes;    /* DATA payload consumed, all streams (flow control) */
     bool stream5_heard;     /* DATA on stream 5 */
@@ -2596,6 +2737,10 @@ static int lp_consume_h2(microlink_t *ml, ml_noise_state_t *noise, lp_h2_result_
         }
         if (pos + 9 + f_len > ml->coord_st.lp.h2_len) break;  /* partial frame: wait for more */
         const uint8_t *payload = fh + 9;
+
+        if (f_stream != 0 && f_stream == ml->setdns_sid) {
+            setdns_frame(ml, f_type, f_flags, payload, f_len);
+        }
 
         if (f_type == 0x00) {  /* DATA */
             r->data_bytes += f_len;
@@ -3484,6 +3629,13 @@ void ml_coord_task(void *arg) {
                     }
                 }
 
+                if (ml->setdns_state == ML_SETDNS_QUEUED) {
+                    setdns_send(ml, &noise);
+                } else if (ml->setdns_state == ML_SETDNS_SENT &&
+                           now - ml->setdns_sent_ms > 60000) {
+                    setdns_finish(ml, false, "no answer from the control server");
+                }
+
                 /* Poll for streaming MapResponse updates */
                 int poll_ret = poll_map_update(ml, &noise);
                 if (poll_ret > 0) {
@@ -3499,6 +3651,7 @@ void ml_coord_task(void *arg) {
             break;
 
         case COORD_RECONNECTING:
+            setdns_finish(ml, false, "the control connection dropped");
             {
                 uint32_t backoff_ms = 1000 << (reconnect_attempts > 4 ? 4 : reconnect_attempts);
                 if (backoff_ms > ML_CTRL_BACKOFF_MAX_MS) backoff_ms = ML_CTRL_BACKOFF_MAX_MS;

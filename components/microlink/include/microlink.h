@@ -272,6 +272,46 @@ int microlink_ip6_input_hook(struct pbuf *p, struct netif *inp);
 int microlink_get_peer_count(const microlink_t *ml);
 
 /**
+ * @brief Our own MagicDNS name (FQDN) as the control plane assigned it
+ * @return e.g. "host.tailnet.ts.net" without the trailing dot, or "" until the
+ *         first MapResponse has named this node
+ */
+const char *microlink_get_self_name(const microlink_t *ml);
+
+/**
+ * @brief The domain the control plane will help get a TLS certificate for
+ * @return First entry of DNSConfig.CertDomains, or "" when HTTPS certificates
+ *         are off for the tailnet (admin console, DNS page)
+ */
+const char *microlink_get_cert_domain(const microlink_t *ml);
+
+/**
+ * @brief Ask the control plane to publish a DNS record (POST /machine/set-dns)
+ *
+ * This is how a node answers an ACME DNS-01 challenge for its own name: name
+ * "_acme-challenge.<cert domain>", type "TXT". Only TXT is supported. Blocks
+ * until the control plane answers or @p timeout_ms passes.
+ *
+ * @param err Optional, gets a short reason on failure
+ * @return ESP_OK when the control plane accepted the record
+ */
+esp_err_t microlink_set_dns(microlink_t *ml, const char *name, const char *type,
+                            const char *value, uint32_t timeout_ms,
+                            char *err, size_t err_len);
+
+/**
+ * @brief When this node's key expires, as the control plane reported it
+ * @return Unix epoch seconds, or 0 when no expiry is known (key expiry
+ *         disabled for the node, or no MapResponse yet)
+ */
+int64_t microlink_get_key_expiry(const microlink_t *ml);
+
+/**
+ * @brief Whether the control plane has declared the node key expired
+ */
+bool microlink_key_expired(const microlink_t *ml);
+
+/**
  * @brief Get peer info by index
  * @param ml Handle
  * @param index Peer index (0 to peer_count-1)

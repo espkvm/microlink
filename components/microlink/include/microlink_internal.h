@@ -237,6 +237,9 @@ typedef struct {
 #define ML_EVT_SHUTDOWN_REQUEST     BIT6
 #define ML_EVT_DERP_RECONNECT       BIT7
 #define ML_EVT_DERP_CONNECT_REQ     BIT8
+#define ML_EVT_SETDNS_DONE          BIT9
+
+enum { ML_SETDNS_IDLE = 0, ML_SETDNS_QUEUED, ML_SETDNS_SENT };
 
 /* ============================================================================
  * Worker Task Liveness
@@ -628,6 +631,22 @@ struct microlink_s {
     /* Pending interactive login (empty = none). Written by the coord task
      * under ml_coord's auth_url lock, read by microlink_get_auth_url(). */
     char auth_url[MICROLINK_AUTH_URL_MAX];
+
+    /* Our MagicDNS name and the tailnet's certificate domain, written by
+     * the coord task. */
+    char self_name[128];
+    char cert_domain[128];
+
+    /* microlink_set_dns(): one request at a time, handed to the coord task,
+     * which sends it on the open control connection. */
+    SemaphoreHandle_t setdns_mu;
+    volatile int setdns_state;          /* ML_SETDNS_* */
+    char setdns_name[160];
+    char setdns_value[128];
+    uint32_t setdns_sid;
+    uint64_t setdns_sent_ms;
+    bool setdns_ok;
+    char setdns_err[96];
 
     /* Control plane host override (empty = use ML_CTRL_HOST default).
      * Set from config struct or NVS at boot for Headscale/Ionscale/custom

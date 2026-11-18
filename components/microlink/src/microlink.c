@@ -337,6 +337,7 @@ static void ml_release(microlink_t *ml) {
     if (ml->coord_cmd_queue)   { vQueueDelete(ml->coord_cmd_queue);   ml->coord_cmd_queue = NULL; }
     if (ml->peer_update_queue) { vQueueDelete(ml->peer_update_queue); ml->peer_update_queue = NULL; }
     if (ml->wg_wake)           { vSemaphoreDelete(ml->wg_wake);       ml->wg_wake = NULL; }
+    if (ml->setdns_mu)         { vSemaphoreDelete(ml->setdns_mu);     ml->setdns_mu = NULL; }
     if (ml->derp_wake_fd >= 0) { close(ml->derp_wake_fd);             ml->derp_wake_fd = -1; }
     if (ml->events)            { vEventGroupDelete(ml->events);       ml->events = NULL; }
 
@@ -630,10 +631,11 @@ microlink_t *microlink_init(const microlink_config_t *config) {
     ml->coord_cmd_queue = xQueueCreate(ML_COORD_CMD_QUEUE_DEPTH, sizeof(ml_coord_cmd_t));
     ml->peer_update_queue = xQueueCreate(ML_PEER_UPDATE_QUEUE_DEPTH, sizeof(ml_peer_update_t *));
     ml->wg_wake = xSemaphoreCreateBinary();
+    ml->setdns_mu = xSemaphoreCreateMutex();
 
     if (!ml->derp_tx_queue || !ml->disco_rx_queue || !ml->wg_rx_queue ||
         !ml->stun_rx_queue || !ml->coord_cmd_queue || !ml->peer_update_queue ||
-        !ml->wg_wake) {
+        !ml->wg_wake || !ml->setdns_mu) {
         ESP_LOGE(TAG, "Failed to create queues");
         ml_release(ml);
         return NULL;
@@ -1012,6 +1014,55 @@ uint32_t microlink_get_vpn_ip(const microlink_t *ml) {
 
 int microlink_get_peer_count(const microlink_t *ml) {
     return ml ? ml->peer_count : 0;
+}
+
+const char *microlink_get_self_name(const microlink_t *ml) {
+    return ml ? ml->self_name : "";
+}
+
+const char *microlink_get_cert_domain(const microlink_t *ml) {
+    return ml ? ml->cert_domain : "";
+}
+
+int64_t microlink_get_key_expiry(const microlink_t *ml) {
+    return ml ? ml->key_expiry_epoch : 0;
+}
+
+bool microlink_key_expired(const microlink_t *ml) {
+    return ml ? ml->key_expired : false;
+}
+
+esp_err_t microlink_set_dns(microlink_t *ml, const char *name, const char *type,
+                            const char *value, uint32_t timeout_ms,
+                            char *err, size_t err_len) {
+    if (err && err_len) err[0] = '\0';
+    if (!ml || !ml->setdns_mu || !name || !value) return ESP_ERR_INVALID_ARG;
+    if (strcmp(type ? type : "TXT", "TXT") != 0) return ESP_ERR_NOT_SUPPORTED;
+    if (strlen(name) >= sizeof(ml->setdns_name) || strlen(value) >= sizeof(ml->setdns_value)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (xSemaphoreTake(ml->setdns_mu, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) return ESP_ERR_TIMEOUT;
+    strcpy(ml->setdns_name, name);
+    strcpy(ml->setdns_value, value);
+    ml->setdns_ok = false;
+    ml->setdns_err[0] = '\0';
+    xEventGroupClearBits(ml->events, ML_EVT_SETDNS_DONE);
+    ml->setdns_state = ML_SETDNS_QUEUED;
+    EventBits_t b = xEventGroupWaitBits(ml->events, ML_EVT_SETDNS_DONE, pdTRUE, pdTRUE,
+                                        pdMS_TO_TICKS(timeout_ms));
+    esp_err_t res;
+    if (!(b & ML_EVT_SETDNS_DONE)) {
+        ml->setdns_state = ML_SETDNS_IDLE;
+        if (err) snprintf(err, err_len, "the control server did not answer");
+        res = ESP_ERR_TIMEOUT;
+    } else if (!ml->setdns_ok) {
+        if (err) snprintf(err, err_len, "%s", ml->setdns_err[0] ? ml->setdns_err : "refused");
+        res = ESP_FAIL;
+    } else {
+        res = ESP_OK;
+    }
+    xSemaphoreGive(ml->setdns_mu);
+    return res;
 }
 
 esp_err_t microlink_get_peer_info(const microlink_t *ml, int index, microlink_peer_info_t *info) {
