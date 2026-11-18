@@ -120,6 +120,9 @@ extern "C" {
  * fallback used before the first DERPMap arrives (ml_derp.c's ml_derp_connect
  * uses the real per-region host from the parsed DERPMap once available). */
 #define ML_DERP_REGION          CONFIG_ML_DERP_REGION
+
+/* TOS byte for direct UDP (DISCO + WireGuard), see Kconfig ML_UDP_TOS */
+#define ML_UDP_TOS              CONFIG_ML_UDP_TOS
 #define ML_DERP_HOST            "derp9e.tailscale.com"
 #define ML_DERP_PORT            443
 

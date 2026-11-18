@@ -165,7 +165,7 @@ static void zc_pcb_create_in_tcpip(void *arg) {
     ml->zc.local_port = ml->zc.pcb->local_port;
 
     /* DSCP 46 (EF) → WMM AC_VO for low-latency WiFi scheduling */
-    ml->zc.pcb->tos = 0xB8;
+    ml->zc.pcb->tos = ML_UDP_TOS;
 
     /* Bind to WiFi netif (skip WG netif) */
     extern struct netif *netif_list;

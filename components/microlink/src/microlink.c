@@ -712,7 +712,7 @@ bsd_socket_fallback:
         /* Mark packets as DSCP 46 (Expedited Forwarding) → WMM AC_VO.
          * WiFi APs with WMM use shorter contention windows for voice-priority
          * traffic, reducing jitter on WireGuard/DISCO UDP packets. */
-        int tos = 0xB8;  /* DSCP 46 = EF, TOS byte = 46 << 2 = 184 */
+        int tos = ML_UDP_TOS;
         setsockopt(ml->disco_sock4, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
 
         /* Set non-blocking for select() in net_io */
@@ -851,7 +851,7 @@ esp_err_t microlink_rebind(microlink_t *ml) {
             bind_addr.sin_port = 0;
             ml_bind(ml->disco_sock4, (struct sockaddr *)&bind_addr, sizeof(bind_addr));
         }
-        int tos = 0xB8;
+        int tos = ML_UDP_TOS;
         setsockopt(ml->disco_sock4, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
         int flags = ml_fcntl(ml->disco_sock4, F_GETFL, 0);
         ml_fcntl(ml->disco_sock4, F_SETFL, flags | O_NONBLOCK);

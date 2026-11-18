@@ -228,6 +228,17 @@ menu "MicroLink V2 Configuration"
         default 300
         range 30 3600
 
+    config ML_UDP_TOS
+        int "TOS byte of direct UDP (DISCO and WireGuard)"
+        default 184
+        range 0 255
+        help
+            184 (0xB8) is DSCP 46 (EF), which Wi-Fi maps to the voice queue
+            (WMM AC_VO). On some radios that queue is a problem: from an
+            ESP32-C6 over esp-hosted such frames did not reach a peer on the
+            same Wi-Fi, so the direct path never held and all traffic went
+            through DERP. 0 sends them best effort.
+
     config ML_UDP_RX_TASK_PRIO
         int "UDP socket receive task priority"
         default 7

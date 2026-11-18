@@ -393,7 +393,7 @@ static void wg_output_pcb_create_in_tcpip(void *arg) {
          * responses from the DISCO BSD socket. udp_sendto uses local_port. */
         s_wg_output_pcb->local_port = 51820;
         /* DSCP 46 (EF) → WMM AC_VO for low-latency WiFi scheduling */
-        s_wg_output_pcb->tos = 0xB8;
+        s_wg_output_pcb->tos = ML_UDP_TOS;
     }
     xSemaphoreGive(s_wg_output_pcb_done);
 }
