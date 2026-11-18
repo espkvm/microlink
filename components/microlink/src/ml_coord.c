@@ -28,6 +28,7 @@
 #include "esp_timer.h"
 #include "esp_random.h"
 #include "esp_netif.h"
+#include "esp_idf_version.h"
 #include "cJSON.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
@@ -1039,9 +1040,21 @@ static void add_hostinfo(microlink_t *ml, cJSON *root) {
     if (!hostinfo) return;
     const char *dev_name = (ml->config.device_name && ml->config.device_name[0])
                                ? ml->config.device_name : microlink_default_device_name();
+    /* The admin console shows OS with OSVersion, and IPNVersion as the
+     * client version. */
+    bool app = ml->config.app_name && ml->config.app_name[0];
+    char os_ver[64], ipn_ver[64];
+    if (app) snprintf(os_ver, sizeof(os_ver), "%s", ml->config.app_name);
+    else snprintf(os_ver, sizeof(os_ver), "ESP-IDF %s", esp_get_idf_version());
+    if (ml->config.app_version && ml->config.app_version[0])
+        snprintf(ipn_ver, sizeof(ipn_ver), "%s (microlink %s)", ml->config.app_version, MICROLINK_VERSION);
+    else
+        snprintf(ipn_ver, sizeof(ipn_ver), "microlink %s", MICROLINK_VERSION);
     cJSON_AddStringToObject(hostinfo, "Hostname", dev_name);
     cJSON_AddStringToObject(hostinfo, "OS", ML_HOSTINFO_OS);
-    cJSON_AddStringToObject(hostinfo, "OSVersion", "ESP-IDF");
+    cJSON_AddStringToObject(hostinfo, "OSVersion", os_ver);
+    cJSON_AddStringToObject(hostinfo, "IPNVersion", ipn_ver);
+    if (app) cJSON_AddStringToObject(hostinfo, "App", ml->config.app_name);
     cJSON_AddStringToObject(hostinfo, "GoArch", "arm");
 
     cJSON *netinfo = cJSON_CreateObject();

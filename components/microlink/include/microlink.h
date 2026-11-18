@@ -16,6 +16,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/* This component's version, as in idf_component.yml */
+#define MICROLINK_VERSION "2.3.0"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -27,6 +30,10 @@ typedef struct microlink_s microlink_t;
 typedef struct {
     const char *auth_key;       /* Tailscale auth key (tskey-auth-...) */
     const char *device_name;    /* Device hostname on the tailnet */
+    const char *app_name;       /* Optional: Hostinfo App and OSVersion ("ESP-KVM"); the
+                                   admin console shows it after the OS. Must stay valid. */
+    const char *app_version;    /* Optional: shown as the client version, "<this> (microlink X)".
+                                   Must stay valid. */
     bool enable_derp;           /* Enable DERP relay (default: true) */
     bool enable_stun;           /* Enable STUN endpoint discovery */
     bool enable_disco;          /* Enable DISCO NAT traversal */
