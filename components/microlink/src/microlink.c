@@ -220,7 +220,7 @@ void ml_task_exit(microlink_t *ml, uint32_t task_bit) {
         /* From here on ml may be freed by another task at any moment. */
         __atomic_fetch_and(&ml->tasks_alive, ~task_bit, __ATOMIC_RELEASE);
     }
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);   /* every task is made WithCaps, see microlink_start() */
     for (;;) { vTaskDelay(portMAX_DELAY); }  /* not reached */
 }
 
@@ -745,18 +745,20 @@ skip_bsd_socket:
         UBaseType_t prio;
         BaseType_t core;
         uint32_t bit;
+        UBaseType_t caps;
     } tasks[] = {
-        { ml_net_io_task,  "ml_net_io",  ML_TASK_NET_IO_STACK,  ML_TASK_NET_IO_PRIO,  ML_TASK_NET_IO_CORE,  ML_TASK_BIT_NET_IO },
-        { ml_derp_tx_task, "ml_derp_tx", ML_TASK_DERP_TX_STACK, ML_TASK_DERP_TX_PRIO, ML_TASK_DERP_TX_CORE, ML_TASK_BIT_DERP_TX },
-        { ml_coord_task,   "ml_coord",   ML_TASK_COORD_STACK,   ML_TASK_COORD_PRIO,   ML_TASK_COORD_CORE,   ML_TASK_BIT_COORD },
-        { ml_wg_mgr_task,  "ml_wg_mgr",  ML_TASK_WG_MGR_STACK,  ML_TASK_WG_MGR_PRIO,  ML_TASK_WG_MGR_CORE,  ML_TASK_BIT_WG_MGR },
+        { ml_net_io_task,  "ml_net_io",  ML_TASK_NET_IO_STACK,  ML_TASK_NET_IO_PRIO,  ML_TASK_NET_IO_CORE,  ML_TASK_BIT_NET_IO,  ML_TASK_STACK_CAPS },
+        { ml_derp_tx_task, "ml_derp_tx", ML_TASK_DERP_TX_STACK, ML_TASK_DERP_TX_PRIO, ML_TASK_DERP_TX_CORE, ML_TASK_BIT_DERP_TX, ML_TASK_STACK_CAPS },
+        { ml_coord_task,   "ml_coord",   ML_TASK_COORD_STACK,   ML_TASK_COORD_PRIO,   ML_TASK_COORD_CORE,   ML_TASK_BIT_COORD,   ML_TASK_STACK_CAPS },
+        { ml_wg_mgr_task,  "ml_wg_mgr",  ML_TASK_WG_MGR_STACK,  ML_TASK_WG_MGR_PRIO,  ML_TASK_WG_MGR_CORE,  ML_TASK_BIT_WG_MGR,  ML_TASK_STACK_INTERNAL },
     };
     TaskHandle_t *handles[] = { &ml->net_io_task, &ml->derp_tx_task, &ml->coord_task, &ml->wg_mgr_task };
 
     for (size_t i = 0; i < sizeof(tasks) / sizeof(tasks[0]); i++) {
         __atomic_fetch_or(&ml->tasks_alive, tasks[i].bit, __ATOMIC_RELEASE);
-        if (xTaskCreatePinnedToCore(tasks[i].fn, tasks[i].name, tasks[i].stack, ml,
-                                    tasks[i].prio, handles[i], tasks[i].core) != pdPASS) {
+        if (xTaskCreatePinnedToCoreWithCaps(tasks[i].fn, tasks[i].name, tasks[i].stack, ml,
+                                            tasks[i].prio, handles[i], tasks[i].core,
+                                            tasks[i].caps) != pdPASS) {
             __atomic_fetch_and(&ml->tasks_alive, ~tasks[i].bit, __ATOMIC_RELEASE);
             *handles[i] = NULL;
             ESP_LOGE(TAG, "Failed to create %s task (free internal=%u psram=%u); rolling back",

@@ -62,6 +62,18 @@ extern "C" {
 #define ML_TASK_APP_CORE        1
 #endif
 
+/* With PSRAM, net_io, derp_tx and coord keep their stacks there: 34 KB less
+ * internal RAM, which an application next to MicroLink is often short of.
+ * They never touch flash, which a task with a PSRAM stack must not do.
+ * wg_mgr writes peers and the WireGuard timestamp to NVS, so its stack stays
+ * internal. */
+#ifdef CONFIG_SPIRAM
+#define ML_TASK_STACK_CAPS      (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+#else
+#define ML_TASK_STACK_CAPS      (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+#endif
+#define ML_TASK_STACK_INTERNAL  (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+
 #define ML_TASK_NET_IO_STACK    (8 * 1024)
 #define ML_TASK_NET_IO_PRIO     7
 #define ML_TASK_NET_IO_CORE     0
@@ -93,7 +105,9 @@ extern "C" {
 #define ML_TASK_UDP_RX_PRIO     CONFIG_ML_UDP_RX_TASK_PRIO
 
 /* Queue depths */
-#define ML_DERP_TX_QUEUE_DEPTH  16
+/* 64: a burst of video through the relay (a TCP window of ~45 packets)
+ * would otherwise overflow it while the I/O task waits on a TLS write. */
+#define ML_DERP_TX_QUEUE_DEPTH  64
 #define ML_DISCO_RX_QUEUE_DEPTH 16
 /* Deep enough to hold a TCP window's worth of packets while the manager task
  * is busy with a handshake or a DISCO probe round. The enqueue in
