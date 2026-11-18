@@ -280,6 +280,7 @@ int ml_peer_nvs_load_all(ml_peer_t *peers, int max_peers) {
         memcpy(p->disco_key, entry->disco_key, 32);
         p->derp_region = entry->derp_region;
         p->active = true;
+        p->cached = true;
         p->wg_peer_index = -1;
 
         /* Restore hostname (truncated, ensure null-terminated) */

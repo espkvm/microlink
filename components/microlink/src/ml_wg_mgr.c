@@ -855,6 +855,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
              * validated direct path and per-endpoint ping history. (Re-adding
              * here used to reset all DISCO state on every PeersChanged.) */
             bool persist = false;
+            e->cached = false;
             if (update->node_id) e->node_id = update->node_id;
             if (update->netmap_gen) e->netmap_gen = update->netmap_gen;
             if (update->disco_valid && memcmp(e->disco_key, update->disco_key, 32) != 0) {
@@ -990,6 +991,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     strlcpy(p->hostname, update->hostname, sizeof(p->hostname));
     p->derp_region = update->derp_region;
     p->active = true;
+    p->cached = false;
     p->online = update->online;
     p->user_id = update->user_id;
     p->rtt_ms = 0;

@@ -118,6 +118,8 @@ typedef struct {
     char hostname[64];
     uint8_t public_key[32];
     bool active;                /* the slot holds a peer (index < peer_count can be a gap) */
+    bool cached;                /* from the NVS cache, not confirmed by the control plane
+                                   yet: hostname cut to 7 characters, no user */
     bool online;                /* control plane's last Online for this peer;
                                    false if it never reported one */
     bool direct_path;           /* true if communicating via direct UDP */

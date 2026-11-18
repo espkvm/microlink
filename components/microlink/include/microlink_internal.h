@@ -365,6 +365,7 @@ typedef struct {
     uint8_t disco_key[32];
     char hostname[64];
     bool active;                /* occupies a slot in this table */
+    bool cached;                /* loaded from NVS, not in a netmap yet */
     bool online;                /* control plane last reported it reachable */
 
     /* Endpoints - the per-address ping-tracking equivalent of real

@@ -1108,6 +1108,7 @@ esp_err_t microlink_get_peer_info(const microlink_t *ml, int index, microlink_pe
     strlcpy(info->hostname, p->hostname, sizeof(info->hostname));   /* the caller's struct may be uninitialised */
     memcpy(info->public_key, p->public_key, 32);
     info->active = p->active;
+    info->cached = p->cached;
     info->online = p->online;
     info->direct_path = p->has_direct_path;
     info->user[0] = '\0';
