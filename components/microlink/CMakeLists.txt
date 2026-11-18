@@ -58,6 +58,7 @@ set(REQUIRES
     esp_driver_gpio
     esp_driver_tsens
     esp_http_server
+    esp_http_client
     app_update
     esp_app_format
     vfs

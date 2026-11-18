@@ -29,6 +29,8 @@
 #include "esp_random.h"
 #include "esp_netif.h"
 #include "esp_idf_version.h"
+#include "esp_http_client.h"
+#include "esp_crt_bundle.h"
 #include "cJSON.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
@@ -523,6 +525,62 @@ static int complete_proactive_frames(microlink_t *ml, uint8_t **buf, int *len) {
     }
 }
 
+/*
+ * A self-hosted control server (Headscale, Ionscale) has a Noise key of its
+ * own, so the built-in Tailscale key fails the handshake. When neither the
+ * config nor Kconfig gives one, ask the server at /key, as tailscaled does,
+ * with the capability version every other request carries (Headscale >= 0.29
+ * refuses old ones). Fills ml->ctrl_noise_pubkey and returns 0.
+ */
+static int fetch_server_pubkey(microlink_t *ml) {
+    char url[160];
+    snprintf(url, sizeof(url), "%s://%s:%u/key?v=%d", ml->ctrl_tls ? "https" : "http",
+             ml->ctrl_host, (unsigned)ml->ctrl_port, ML_CTRL_PROTOCOL_VER);
+    ESP_LOGI(TAG, "Fetching the control server's Noise key: %s", url);
+
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .timeout_ms = 10000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .buffer_size = 1024,
+    };
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    if (!c) return -1;
+    int rc = -1;
+    char body[512];
+    int n = 0;
+    if (esp_http_client_open(c, 0) == ESP_OK && esp_http_client_fetch_headers(c) >= 0 &&
+        esp_http_client_get_status_code(c) == 200) {
+        int r;
+        while (n < (int)sizeof(body) - 1 &&
+               (r = esp_http_client_read(c, body + n, sizeof(body) - 1 - n)) > 0) {
+            n += r;
+        }
+    } else {
+        ESP_LOGE(TAG, "/key failed (status %d)", esp_http_client_get_status_code(c));
+    }
+    esp_http_client_close(c);
+    esp_http_client_cleanup(c);
+    body[n] = '\0';
+
+    /* {"legacyPublicKey":"mkey:...","publicKey":"mkey:<64 hex>"} */
+    cJSON *root = n > 0 ? cJSON_Parse(body) : NULL;
+    cJSON *pk = root ? cJSON_GetObjectItem(root, "publicKey") : NULL;
+    if (cJSON_IsString(pk) && pk->valuestring) {
+        const char *s = pk->valuestring;
+        if (strncmp(s, "mkey:", 5) == 0) s += 5;
+        if (strlen(s) == 64 && hex_to_bytes(s, ml->ctrl_noise_pubkey, 32) == 32) {
+            ml->ctrl_noise_pubkey_set = true;
+            rc = 0;
+        }
+    }
+    if (rc != 0) {
+        ESP_LOGE(TAG, "No usable publicKey from /key: %.120s", body);
+    }
+    cJSON_Delete(root);
+    return rc;
+}
+
 static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
     int64_t t_noise_start = esp_timer_get_time();
     /* A challenge belongs to one connection: never answer a previous one. */
@@ -546,6 +604,11 @@ static int do_noise_handshake(microlink_t *ml, ml_noise_state_t *noise) {
         }
     }
 #endif
+    /* A self-hosted server with no key given: its own, fetched once. */
+    if (!server_key && ml->ctrl_host[0]) {
+        if (fetch_server_pubkey(ml) != 0) return -1;
+        server_key = ml->ctrl_noise_pubkey;
+    }
     ml_noise_init(noise,
                    ml->machine_private_key, ml->machine_public_key,
                    server_key);
