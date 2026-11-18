@@ -115,6 +115,13 @@ typedef struct {
     bool online;                /* control plane's last Online for this peer;
                                    false if it never reported one */
     bool direct_path;           /* true if communicating via direct UDP */
+    char user[64];              /* owner's login name, "" when unknown */
+    char user_display[48];      /* owner's display name */
+    uint32_t rtt_ms;            /* last DISCO round trip, 0 = none yet */
+    bool rtt_direct;            /* that round trip went straight, not over DERP */
+    uint32_t endpoint_ip;       /* the direct path in use (host order), 0 = none */
+    uint16_t endpoint_port;
+    uint16_t derp_region;       /* the peer's home DERP region */
 } microlink_peer_info_t;
 
 /* Connection state */

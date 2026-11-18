@@ -872,6 +872,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
                 persist = true;
             }
             if (update->online_valid) e->online = update->online;
+            if (update->user_id) e->user_id = update->user_id;
             if (update->has_ip6 && (!e->has_ip6 || memcmp(e->vpn_ip6, update->vpn_ip6, 16) != 0)) {
                 memcpy(e->vpn_ip6, update->vpn_ip6, 16);
                 e->has_ip6 = true;
@@ -990,6 +991,9 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     p->derp_region = update->derp_region;
     p->active = true;
     p->online = update->online;
+    p->user_id = update->user_id;
+    p->rtt_ms = 0;
+    p->rtt_direct = false;
 
     /* Copy endpoints. New peer, so nothing to preserve - every entry starts
      * with last_ping_ms=0 ("never pinged yet"), matching a fresh entry in
@@ -1216,6 +1220,7 @@ static void patch_peer(microlink_t *ml, const ml_peer_update_t *update) {
         re->derp_region = update->derp_region > 0 ? update->derp_region : p->derp_region;
         re->online = update->online_valid ? update->online : p->online;
         re->online_valid = true;
+        re->user_id = update->user_id ? update->user_id : p->user_id;
         const ml_peer_update_t *src_eps = update->endpoint_count > 0 ? update : NULL;
         re->endpoint_count = src_eps ? src_eps->endpoint_count : p->endpoint_count;
         for (int i = 0; i < re->endpoint_count && i < ML_MAX_ENDPOINTS; i++) {
@@ -1241,6 +1246,9 @@ static void patch_peer(microlink_t *ml, const ml_peer_update_t *update) {
     }
     if (update->online_valid) {
         p->online = update->online;
+    }
+    if (update->user_id) {
+        p->user_id = update->user_id;
     }
     ESP_LOGD(TAG, "Peer patched: %s (eps=%d derp=%d online=%d)",
              p->hostname, p->endpoint_count, p->derp_region, p->online);
@@ -1891,6 +1899,8 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
                  pkt->via_derp ? "DERP" : "direct");
 
         p->last_pong_recv_ms = now;
+        p->rtt_ms = (uint32_t)rtt_ms;
+        p->rtt_direct = path_ok;
         uint32_t round = pending_probes[i].round;
         pending_probes[i].active = false;
         matched = true;

@@ -1463,7 +1463,36 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
 
 static void log_map_health(cJSON *root);
 
+/* UserProfiles: who owns each node. Full maps carry them all, deltas only the
+ * new ones, so entries are added or refreshed, never dropped. */
+static void parse_user_profiles(microlink_t *ml, cJSON *root) {
+    cJSON *profiles = cJSON_GetObjectItem(root, "UserProfiles");
+    if (!profiles || !cJSON_IsArray(profiles)) return;
+    cJSON *u;
+    cJSON_ArrayForEach(u, profiles) {
+        cJSON *id = cJSON_GetObjectItem(u, "ID");
+        if (!id || !cJSON_IsNumber(id)) continue;
+        const int64_t uid = (int64_t)id->valuedouble;
+        int slot = -1;
+        for (int i = 0; i < ml->user_count; i++) {
+            if (ml->users[i].id == uid) { slot = i; break; }
+        }
+        if (slot < 0) {
+            if (ml->user_count >= ML_MAX_USERS) continue;
+            slot = ml->user_count++;
+        }
+        ml->users[slot].id = uid;
+        cJSON *login = cJSON_GetObjectItem(u, "LoginName");
+        cJSON *disp = cJSON_GetObjectItem(u, "DisplayName");
+        snprintf(ml->users[slot].login, sizeof(ml->users[slot].login), "%s",
+                 (login && cJSON_IsString(login)) ? login->valuestring : "");
+        snprintf(ml->users[slot].display, sizeof(ml->users[slot].display), "%s",
+                 (disp && cJSON_IsString(disp)) ? disp->valuestring : "");
+    }
+}
+
 static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
+    parse_user_profiles(ml, root);
     /* Try all field names used by Tailscale (copied from v1 lines 3176-3184):
      *   "Peers"        - Full peer list (initial Stream=false response)
      *   "PeersChanged" - Incremental updates (Stream=true long-poll)
@@ -1513,6 +1542,10 @@ static void parse_peers_from_map_response(microlink_t *ml, cJSON *root) {
         cJSON *node_id = cJSON_GetObjectItem(peer, "ID");
         if (node_id && cJSON_IsNumber(node_id)) {
             update->node_id = (int64_t)node_id->valuedouble;
+        }
+        cJSON *user = cJSON_GetObjectItem(peer, "User");
+        if (user && cJSON_IsNumber(user)) {
+            update->user_id = (int64_t)user->valuedouble;
         }
 
         /* Hostname */

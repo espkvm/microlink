@@ -1075,6 +1075,20 @@ esp_err_t microlink_get_peer_info(const microlink_t *ml, int index, microlink_pe
     memcpy(info->public_key, p->public_key, 32);
     info->online = p->online;
     info->direct_path = p->has_direct_path;
+    info->user[0] = '\0';
+    info->user_display[0] = '\0';
+    for (int i = 0; p->user_id && i < ml->user_count; i++) {
+        if (ml->users[i].id == p->user_id) {
+            snprintf(info->user, sizeof(info->user), "%s", ml->users[i].login);
+            snprintf(info->user_display, sizeof(info->user_display), "%s", ml->users[i].display);
+            break;
+        }
+    }
+    info->rtt_ms = p->rtt_ms;
+    info->rtt_direct = p->rtt_direct;
+    info->endpoint_ip = p->has_direct_path ? p->best_ip : 0;
+    info->endpoint_port = p->has_direct_path ? p->best_port : 0;
+    info->derp_region = p->derp_region;
     return ESP_OK;
 }
 

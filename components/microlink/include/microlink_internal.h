@@ -107,6 +107,7 @@ extern "C" {
 
 /* Protocol limits */
 #define ML_MAX_PEERS            CONFIG_ML_MAX_PEERS
+#define ML_MAX_USERS            32      /* UserProfiles kept from the netmap */
 #define ML_MAX_ENDPOINTS        8
 #define ML_MAX_PACKET_SIZE      1500
 #define ML_DERP_MAX_FRAME       (ML_MAX_PACKET_SIZE + 64)
@@ -309,6 +310,7 @@ typedef struct {
         ML_PEER_REQ_CMM_ALL,    /* paced CallMeMaybe to every active peer */
     } action;
     int64_t node_id;            /* tailcfg NodeID (0 = unknown) */
+    int64_t user_id;            /* Node.User, looked up in the UserProfiles (0 = unknown) */
     uint32_t netmap_gen;        /* full-netmap generation (0 = delta update) */
     bool key_valid;             /* public_key present (patches may omit it) */
     bool disco_valid;           /* disco_key present (patches may omit it) */
@@ -380,6 +382,9 @@ typedef struct {
     uint16_t best_port;
     bool has_direct_path;
     uint32_t best_rtt_ms;           /* RTT of the last pong on best_ip:best_port */
+    uint32_t rtt_ms;                /* round trip of the last matched DISCO PONG, any path */
+    bool rtt_direct;                /* ...and whether it came straight, not over DERP */
+    int64_t user_id;                /* owner, in microlink_t.users */
     uint64_t best_pong_ms;          /* when best_ip:best_port last answered */
     uint64_t last_full_ping_ms;     /* last round that pinged every endpoint */
 
@@ -605,6 +610,14 @@ struct microlink_s {
     /* DERP map (parsed from MapResponse, owned by coord task) */
     ml_derp_region_t derp_regions[ML_MAX_DERP_REGIONS];
     uint8_t derp_region_count;
+
+    /* Who owns each node: the netmap's UserProfiles, kept by ID. */
+    struct {
+        int64_t id;
+        char login[64];
+        char display[48];
+    } users[ML_MAX_USERS];
+    int user_count;
     uint16_t derp_home_region;      /* Our PreferredDERP region */
 
     /* Key expiry (parsed from MapResponse self-node) */
