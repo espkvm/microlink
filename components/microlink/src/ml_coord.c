@@ -1890,8 +1890,11 @@ static void parse_cert_domains(microlink_t *ml, cJSON *root) {
  * a MapResponse. Shared parser called from both paths — the Stream=false
  * one-shot fetch and the streaming_map_fetch initial netmap (extracted from
  * do_fetch_peers). */
+static void parse_ping_request(microlink_t *ml, cJSON *root);
+
 static void parse_self_node_from_map(microlink_t *ml, cJSON *map_json) {
     parse_cert_domains(ml, map_json);
+    parse_ping_request(ml, map_json);
     cJSON *node = cJSON_GetObjectItem(map_json, "Node");
     if (!node) return;
     set_self_name(ml, node);
@@ -2564,6 +2567,7 @@ static void lp_handle_message(microlink_t *ml, const char *json, size_t len) {
 
     if (node) set_self_name(ml, node); /* the machine was renamed */
     parse_cert_domains(ml, update_json);
+    parse_ping_request(ml, update_json);
     parse_peers_from_map_response(ml, update_json);
     ml_filter_update_from_map(update_json);
     ml_wg_mgr_wake(ml);
@@ -2709,6 +2713,114 @@ static void setdns_frame(microlink_t *ml, uint8_t type, uint8_t flags,
     } else if (type == 0x03) {  /* RST_STREAM */
         setdns_finish(ml, false, "the control server reset the request");
     }
+}
+
+/* ============================================================================
+ * c2n: requests from the control server to the node itself
+ * ========================================================================== */
+
+/* MapResponse.PingRequest with Types "c2n": Payload is an HTTP/1.1 request
+ * (base64 in the JSON). The node answers by POSTing the whole HTTP response
+ * to URL. Only the request line is used; the admin console sends GETs such as
+ * /tls-cert-status?domain=... Other pings (disco, TSMP) are not answered. */
+static void parse_ping_request(microlink_t *ml, cJSON *root) {
+    cJSON *pr = cJSON_GetObjectItem(root, "PingRequest");
+    if (!cJSON_IsObject(pr)) return;
+    cJSON *types = cJSON_GetObjectItem(pr, "Types");
+    cJSON *url = cJSON_GetObjectItem(pr, "URL");
+    cJSON *payload = cJSON_GetObjectItem(pr, "Payload");
+    if (!cJSON_IsString(types) || strcmp(types->valuestring, "c2n") != 0) {
+        ESP_LOGD(TAG, "PingRequest %s: not answered",
+                 cJSON_IsString(types) ? types->valuestring : "(no type)");
+        return;
+    }
+    if (!cJSON_IsTrue(cJSON_GetObjectItem(pr, "URLIsNoise")) || !cJSON_IsString(url) ||
+        !cJSON_IsString(payload)) {
+        ESP_LOGW(TAG, "c2n request without a Noise URL or payload, ignored");
+        return;
+    }
+    if (ml->c2n_reply_path[0]) {
+        ESP_LOGW(TAG, "c2n request while one is pending, dropped");
+        return;
+    }
+
+    /* "https://host/path" -> "/path" */
+    const char *u = url->valuestring;
+    const char *host = strstr(u, "://");
+    const char *path = host ? strchr(host + 3, '/') : NULL;
+    if (!path || strlen(path) >= sizeof(ml->c2n_reply_path)) {
+        ESP_LOGW(TAG, "c2n reply URL not usable: %.80s", u);
+        return;
+    }
+
+    unsigned char req[ML_C2N_PATH_MAX + 32];
+    size_t n = 0;
+    if (mbedtls_base64_decode(req, sizeof(req) - 1, &n, (const unsigned char *)payload->valuestring,
+                              strlen(payload->valuestring)) != 0 &&
+        n == 0) {
+        ESP_LOGW(TAG, "c2n payload not readable");
+        return;
+    }
+    req[n] = '\0';
+    /* "GET /tls-cert-status?domain=x HTTP/1.1\r\n..." */
+    char method[ML_C2N_METHOD_MAX], target[ML_C2N_PATH_MAX];
+    if (sscanf((const char *)req, "%7s %255s", method, target) != 2) {
+        ESP_LOGW(TAG, "c2n request line not readable");
+        return;
+    }
+    strcpy(ml->c2n_method, method);
+    strcpy(ml->c2n_path, target);
+    strcpy(ml->c2n_reply_path, path);
+    ESP_LOGI(TAG, "c2n request: %s %s", method, target);
+}
+
+static const char *http_reason(int status) {
+    switch (status) {
+    case 200: return "OK";
+    case 400: return "Bad Request";
+    case 404: return "Not Found";
+    default: return "Error";
+    }
+}
+
+/* Answer the pending c2n request: the HTTP response, POSTed on a stream of
+ * its own. The control server's own reply on that stream is not needed. */
+static void c2n_send(microlink_t *ml, ml_noise_state_t *noise) {
+    const size_t body_cap = 1024;
+    char *body = ml_psram_malloc(body_cap);
+    char *resp = ml_psram_malloc(body_cap + 160);
+    uint8_t *h2 = ml_psram_malloc(body_cap + 160 + 512);
+    if (!body || !resp || !h2) goto out;
+
+    body[0] = '\0';
+    int status = 404;
+    if (ml->config.c2n_handler) {
+        status = ml->config.c2n_handler(ml->c2n_method, ml->c2n_path, body, body_cap, ml->config.c2n_arg);
+    }
+    if (status == 404 && !body[0]) snprintf(body, body_cap, "not supported\n");
+    const char *ctype = body[0] == '{' ? "application/json" : "text/plain; charset=utf-8";
+    int rl = snprintf(resp, body_cap + 160,
+                      "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %u\r\n\r\n%s", status,
+                      http_reason(status), ctype, (unsigned)strlen(body), body);
+    if (rl <= 0 || rl >= (int)(body_cap + 160)) goto out;
+
+    if (ml->h2_next_stream_id < 7) ml->h2_next_stream_id = 7;
+    uint32_t sid = ml->h2_next_stream_id;
+    ml->h2_next_stream_id += 2;
+    size_t cap = body_cap + 160 + 512;
+    int hl = ml_h2_build_headers_frame(h2, cap, "POST", ml->c2n_reply_path, CTRL_HOST(ml),
+                                       "application/octet-stream", sid, false);
+    int dl = hl > 0 ? ml_h2_build_data_frame(h2 + hl, cap - hl, (uint8_t *)resp, rl, sid, true) : -1;
+    if (dl > 0 && noise_send(ml, noise, h2, hl + dl) >= 0) {
+        ESP_LOGI(TAG, "c2n %s %s -> %d (stream %lu)", ml->c2n_method, ml->c2n_path, status, (unsigned long)sid);
+    } else {
+        ESP_LOGW(TAG, "c2n answer not sent");
+    }
+out:
+    free(body);
+    free(resp);
+    free(h2);
+    ml->c2n_reply_path[0] = '\0';
 }
 
 typedef struct {
@@ -3627,6 +3739,10 @@ void ml_coord_task(void *arg) {
                         state = COORD_RECONNECTING;
                         break;
                     }
+                }
+
+                if (ml->c2n_reply_path[0]) {
+                    c2n_send(ml, &noise);
                 }
 
                 if (ml->setdns_state == ML_SETDNS_QUEUED) {

@@ -241,6 +241,10 @@ typedef struct {
 
 enum { ML_SETDNS_IDLE = 0, ML_SETDNS_QUEUED, ML_SETDNS_SENT };
 
+/* One control-to-node (c2n) request at a time, answered from coord. */
+#define ML_C2N_METHOD_MAX 8
+#define ML_C2N_PATH_MAX   256
+
 /* ============================================================================
  * Worker Task Liveness
  *
@@ -647,6 +651,12 @@ struct microlink_s {
     uint64_t setdns_sent_ms;
     bool setdns_ok;
     char setdns_err[96];
+
+    /* A c2n request from the last MapResponse, waiting for coord to answer
+     * (c2n_reply_path empty = none). */
+    char c2n_method[ML_C2N_METHOD_MAX];
+    char c2n_path[ML_C2N_PATH_MAX];
+    char c2n_reply_path[ML_C2N_PATH_MAX];
 
     /* Control plane host override (empty = use ML_CTRL_HOST default).
      * Set from config struct or NVS at boot for Headscale/Ionscale/custom

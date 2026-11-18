@@ -80,6 +80,14 @@ typedef struct {
     uint8_t ctrl_tls;
     uint16_t ctrl_port;
 
+    /* Requests the control server sends to the node itself ("c2n"), such as
+     * the admin console asking for the TLS certificate's state. Called from
+     * the coordination task with the method and the path with its query;
+     * writes the body (JSON or text) into body and returns the HTTP status.
+     * NULL: every request gets 404. Keep it quick, it holds up the long-poll. */
+    int (*c2n_handler)(const char *method, const char *path, char *body, size_t cap, void *arg);
+    void *c2n_arg;
+
     /* Subnet router / exit node (needs CONFIG_ML_SUBNET_ROUTER). Prefixes,
      * separated by commas or spaces, that this device offers to the
      * tailnet, e.g. "192.168.1.0/24, fd12:3456::/64" (IPv6 needs
